@@ -527,8 +527,9 @@ Independent of how far the phases have progressed, except where noted.
 - [x] **CI running the parity suite.** `.github/workflows/tests.yml`: `r-lib/actions/setup-r`, laGP
       from CRAN with a fallback to the pinned `laGP_1.5.9.tar.gz` archive tarball, then the suite
       under `LAGPAX_STRICT=1`. That env var makes `tests/conftest.py` return a nonzero exit on any
-      skip, which is what stops the job going green without ever loading R. It has not run on GitHub
-      yet — the repo has no remote — so treat the first push as the real check of the R install step.
+      skip, which is what stops the job going green without ever loading R. `origin/main` is still at
+      `8df0bce`, so the workflow has never actually run — treat the first push as the real check of
+      the R install step, and expect the CRAN-vs-archive fallback to be where it breaks.
 - [ ] **Do not weaken the license.** LGPL-2.0-or-later, inherited. Keep `NOTICE` accurate as modules
       are added.
 - [ ] `README.md` accurate: scope list, the `aGP.seq` claim, the differentiability claim, and the
