@@ -218,35 +218,65 @@ def _dgamma_log(x: Float[Array, "..."], a: Scalar, b: Scalar) -> Float[Array, ".
     return (a - 1.0) * jnp.log(x) - b * x + a * jnp.log(b) - jsp.special.gammaln(a)
 
 
-def _llik(gp: GP, dab, gab) -> Scalar:
+def _llik_from(df, ldetK, ldetF, phi, d, g, dab, gab) -> Scalar:
     """Log marginal likelihood plus optional Gamma log-priors, matching llikGPsep."""
-    llik = -0.5 * (gp.df * jnp.log(0.5 * gp.phi) + gp.ldetK + gp.ldetF)
+    llik = -0.5 * (df * jnp.log(0.5 * phi) + ldetK + ldetF)
 
     # priors only apply when both hyperparameters of the Gamma are positive
     use_dab = (dab[0] > 0) & (dab[1] > 0)
     db = jnp.where(use_dab, dab[1], 1.0)
-    prior_d = jnp.sum(jnp.where(gp.d > 0, _dgamma_log(gp.d, dab[0], db), 0.0))
+    prior_d = jnp.sum(jnp.where(d > 0, _dgamma_log(d, dab[0], db), 0.0))
     llik = llik + jnp.where(use_dab, prior_d, 0.0)
 
-    use_gab = (gp.g > 0) & (gab[0] > 0) & (gab[1] > 0)
+    use_gab = (g > 0) & (gab[0] > 0) & (gab[1] > 0)
     gb = jnp.where(use_gab, gab[1], 1.0)
-    gs = jnp.where(use_gab, gp.g, 1.0)
+    gs = jnp.where(use_gab, g, 1.0)
     return llik + jnp.where(use_gab, _dgamma_log(gs, gab[0], gb), 0.0)
+
+
+def _llik(gp: GP, dab, gab) -> Scalar:
+    return _llik_from(gp.df, gp.ldetK, gp.ldetF, gp.phi, gp.d, gp.g, dab, gab)
+
+
+def _profile(gp: GP, d, g) -> tuple[Scalar, Scalar, Scalar]:
+    """(ldetK, ldetF, phi) at new hyperparameters, without materializing K's inverse.
+
+    `_build` inverts K explicitly because ALC needs the inverse; a likelihood never does.
+    Every MLE inner iteration is this function and its derivatives, so skipping the inverse
+    takes the objective from two O(n^3) solves down to one Cholesky.
+    """
+    X, n = gp.X, gp.X.shape[0]
+    d = jnp.broadcast_to(jnp.atleast_1d(jnp.asarray(d, X.dtype)), (gp.m,))
+    K = covar_symm(d, X, g)
+    K = jnp.where(gp.mask[:, None] & gp.mask[None, :], K, jnp.eye(n, dtype=X.dtype))
+
+    chol = jsp.linalg.cho_factor(K)
+    ldetK = 2.0 * jnp.sum(jnp.log(jnp.diag(chol[0])))
+
+    # Z and F were masked when the GP was built, so they need no masking again here
+    if gp.p == 0:
+        resid, ldetF = gp.Z, jnp.zeros((), X.dtype)
+    else:
+        KiF = jsp.linalg.cho_solve(chol, gp.F)
+        fchol = jsp.linalg.cho_factor(gp.F.T @ KiF)
+        ldetF = 2.0 * jnp.sum(jnp.log(jnp.diag(fchol[0])))
+        resid = gp.Z - gp.F @ jsp.linalg.cho_solve(fchol, KiF.T @ gp.Z)
+    return ldetK, ldetF, jnp.dot(resid, jsp.linalg.cho_solve(chol, resid))
 
 
 def llik_d(gp: GP, d: Float[Array, "m"], dab=(0.0, 0.0)) -> Scalar:
     """llik as a function of the lengthscale only, for gradients and optimization."""
-    return _llik(gp.at(d=d), dab, (0.0, 0.0))
+    return _llik_from(gp.df, *_profile(gp, d, gp.g), d, gp.g, dab, (0.0, 0.0))
 
 
 def llik_g(gp: GP, g: Scalar, gab=(0.0, 0.0)) -> Scalar:
     """llik as a function of the nugget only, for gradients and optimization."""
-    return _llik(gp.at(g=g), (0.0, 0.0), gab)
+    return _llik_from(gp.df, *_profile(gp, gp.d, g), gp.d, g, (0.0, 0.0), gab)
 
 
 def llik_dg(gp: GP, d: Float[Array, "m"], g: Scalar, dab=(0.0, 0.0), gab=(0.0, 0.0)):
     """llik as a function of both hyperparameters; the objective jmle alternates over."""
-    return _llik(gp.at(d=d, g=g), dab, gab)
+    return _llik_from(gp.df, *_profile(gp, d, g), d, g, dab, gab)
 
 
 dllik_d = jax.grad(llik_d, argnums=1)

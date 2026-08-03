@@ -131,10 +131,14 @@ returns ~8 significant digits and a central difference carries `|x| * 1e-8 / 2h`
 tightening `factr` to 1e3 only moves it to 6.8e-5. `tests/test_diff.py` compares against an argmin
 obtained by root-finding `grad llik = 0` with scipy instead, which reaches ~1e-6.
 
-`jit` preserves the optimizer trajectory (1e-9); `vmap` does not. A batched `while_loop` shares its
-trip count, so one ulp of likelihood difference flips the relative-change stopping test and the
-answers separate by `sqrt(factr*eps)` ~ 5e-5 while the likelihood reached agrees to `factr*eps` =
-2.2e-9. Compare the objective, not the argmin, across batching.
+`jit` preserves the optimizer trajectory (1e-9); `vmap` does not. `vmap` rewrites the arithmetic and
+a batched `while_loop` shares its trip count, so one ulp of likelihood difference flips the
+relative-change stopping test and the two runs stop at different iterates, separated by the solver's
+own resolution `sqrt(factr*eps)` ~ 4.7e-5 relative in `d`. Compare the objective, not the argmin —
+but the objective is only *second* order better, ~2e-6 relative, because the likelihood is stationary
+at both stopping points. It is not `factr*eps`: that bounds the last accepted step's improvement, not
+the distance from either stopping point to the optimum. `test_the_scheme_vmaps_over_datasets` asserted
+2.2e-9 for a while and passed by luck; a rounding-neutral change to the factorization path exposed it.
 
 ### laGP conventions worth remembering
 
@@ -416,8 +420,10 @@ Phase 4  differentiable fitting      done, f86c421
 Phase 5  MSPE / Fisher / blhs        done, this section's last
 ```
 
-Every phase has landed, and the CI job exists (`.github/workflows/tests.yml`). What is left: the
-performance levers in `ROADMAP.md`'s cross-cutting section, and the pre-publish checklist below.
+Every phase has landed, and the CI job exists (`.github/workflows/tests.yml`). The MLE inner loop no
+longer inverts `K` (see `gp._profile`), which halved the flops of a fitted local GP. What is left:
+the remaining performance levers in `ROADMAP.md`'s cross-cutting section, and the pre-publish
+checklist below.
 `ROADMAP.md` has the per-phase design, acceptance criteria and laGP reference algorithms, plus the
 departures from its own plan that were worth keeping.
 
@@ -476,9 +482,15 @@ any cross-chip comparison: pin the same host CPU, or report laGP baselines per n
 
 Current state: a 25x fp64-throughput range across GTX 1080 / L40S / V100 produces only a 2.9x spread
 in wall clock, so the workload is bound by kernel-launch latency and the sequential ALC greedy loop,
-not arithmetic. Buying a better GPU does not fix that. The open levers are a rank-1 Cholesky update
-in the ALC loop, `lax.scan` over the greedy steps, fp32 for the ALC selection stage with fp64 for the
-final fit, and a batch-size sweep.
+not arithmetic. Buying a better GPU does not fix that.
+
+The CPU profile is measured, and the levers that follow from it are in `ROADMAP.md`'s cross-cutting
+section — read that before optimizing anything. Short version: at `n=4000`, `end=50`, 100 locations
+it is 0.16s neighbours / 1.4s design / 2.9s fit, and inside one greedy step the cost is
+`covar(d, Xcand, Xdesign)` at ~290us against ~110us for the entire GP rebuild it feeds. So caching
+the cross-covariance across greedy steps is the lever; a rank-1 Cholesky rebuild is worth ~3% of the
+design stage, not the 30% the GPU-era reading of that list assumed. The batch-size sweep is done and
+flat, and a blocked line search was tried and reverted.
 
 ## License
 

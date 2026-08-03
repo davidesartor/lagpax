@@ -407,9 +407,11 @@ keeping:
 
 Also established: `jit` preserves the optimizer trajectory (1e-9), `vmap` does not. A batched
 `while_loop` shares its trip count, so one ulp of likelihood difference flips `lbfgsb`'s
-relative-change test and the answers separate by the solver's own resolution `sqrt(factr*eps)` ~ 5e-5
-while the likelihood reached still agrees to `factr*eps` = 2.2e-9. Assert the objective, not the
-argmin, when comparing batched against unbatched.
+relative-change test and the answers separate by the solver's own resolution `sqrt(factr*eps)` ~ 4.7e-5
+relative in `d`. Assert the objective, not the argmin, when comparing batched against unbatched — but
+assert it at ~1e-5, not at `factr*eps`. The likelihood is stationary at both stopping points, so the
+gap it inherits is second order in the argmin separation (~2e-6 relative, measured); `factr*eps`
+bounds only the improvement of the last accepted step.
 
 **Goal.** Make the whole emulator an ordinary JAX function: `jit`-able end to end, and
 differentiable through the hyperparameter fit, not just with hyperparameters held fixed.
@@ -516,13 +518,47 @@ emulator).
 Not a phase; pick these up when a phase makes one of them natural. Current state is that a 25x
 fp64-throughput range across GTX 1080 / L40S / V100 produces only a 2.9x spread in wall clock, so the
 workload is bound by kernel-launch latency and the sequential ALC greedy loop, not arithmetic. Buying
-a better GPU does not fix it. Open levers:
+a better GPU does not fix it.
 
-- Rank-1 Cholesky update inside the ALC greedy loop instead of a rebuild. `GP.update` also rebuilds
-  rather than applying laGP's rank-1 update — correct, but a performance item.
-- `lax.scan` over the greedy steps.
+### Done: the MLE stops inverting K
+
+`_build` materializes `Ki` because ALC needs the inverse; a likelihood needs only `ldetK` and `phi`,
+and the MLE inner loop is nothing but likelihoods. `gp.llik_d`/`llik_g`/`llik_dg` now go through
+`gp._profile`, one Cholesky and two triangular solves, and `jmle` carries `(d, g)` through its
+`while_loop` instead of a GP so the alternating half-steps stop factorizing a `K` nobody reads.
+Measured with XLA's cost model on one local GP at `end=50`, `close=1050`:
+
+| configuration | before | after |
+| --- | --- | --- |
+| `criterion="alc"`, d and g estimated | 3.21e7 flops | 1.68e7 |
+| `criterion="nn"`, d and g estimated | 2.58e7 flops | 1.04e7 |
+| `criterion="alc"`, nothing estimated | 6.50e6 flops | 6.50e6 |
+
+The third row is design selection alone, and it is unchanged by design. Results move by <5e-12, which
+is rounding: the same quantities down a different factorization path.
+
+### Measure before optimizing further
+
+The profile on a 16-core CPU at `n=4000`, `end=50`, 100 locations is neighbour search 0.16s, design
+selection 1.4s, fit 2.9s. Within one greedy step the cost is **`covar(d, Xcand, Xdesign)`**, not the
+linear algebra: 1050x50 correlations cost ~290us against ~110us for the whole GP rebuild it feeds.
+So the levers below are ranked by that, not by flop counts:
+
+- **Cache the candidate/design cross-covariance across greedy steps.** Only one column is new per
+  step, so the loop recomputes 1050x50 correlations `end - start` times where 1050x`end` would do —
+  ~40x the transcendental work. This is the big one. It needs a criterion to accept a precomputed
+  `kx`, which is a second protocol attribute next to `minimize`; that cost against ~19% end-to-end is
+  why it has not been taken.
 - fp32 for the ALC *selection* stage with fp64 for the final fit. Selection only needs an argmax.
-- Batch-size sweep for `lax.map(batch_size=)`.
+- Rank-1 Cholesky update inside the greedy loop instead of a rebuild. Worth ~3% of the design stage
+  on the measurement above, not the 30% the GPU-era reading of this list assumed. `GP.update` also
+  rebuilds rather than applying laGP's rank-1 update — correct, and the same small item.
+- `lax.scan` over the greedy steps.
+- ~~Batch-size sweep for `lax.map(batch_size=)`~~ — done, and flat: on CPU everything from
+  `batch=2` to `batch=128` lands within 15% of each other, and only `batch=1` is bad (2.6x, dispatch
+  overhead). The default of 64 is fine; the knob matters for peak memory, not throughput.
+- A blocked line search in `lbfgsb` was tried and reverted: the 21 Armijo probes go out as one
+  `vmap` and XLA spreads them across cores, so probing in blocks of four saves flops and no time.
 
 **Benchmark hygiene**, from `CLAUDE.md` § bench: `bench/accuracy.py` must keep computing `darg` once
 and handing the same prior to both sides — with independent priors the median relative error at
@@ -545,8 +581,10 @@ Independent of how far the phases have progressed, except where noted.
       free its filename, so burning `0.1.0` on a stub costs the real first release its natural
       number. A stub `__init__.py` with a version string plus a README pointing at the GitHub repo is
       enough; it reserves the name without shipping something you have to support.
-- [ ] **Phase 0 lands before `0.1.0`.** The stub commits to nothing, so the rename is free until the
-      first real release and expensive after it.
+- [x] **Phase 0 lands before `0.1.0`.** Done in `539c740`, before anything was published. The stub
+      commits to nothing, so the rename was free; after the first real release it would not be.
+      Note `pyproject.toml` currently declares `version = "0.1.0"` — the placeholder upload has to
+      override it to `0.0.1`, or the declaration has to be walked back first.
 - [x] **CI running the parity suite.** `.github/workflows/tests.yml`: `r-lib/actions/setup-r`, laGP
       from CRAN with a fallback to the pinned `laGP_1.5.9.tar.gz` archive tarball, then the suite
       under `LAGPAX_STRICT=1`. That env var makes `tests/conftest.py` return a nonzero exit on any
@@ -555,8 +593,10 @@ Independent of how far the phases have progressed, except where noted.
       the R install step, and expect the CRAN-vs-archive fallback to be where it breaks.
 - [ ] **Do not weaken the license.** LGPL-2.0-or-later, inherited. Keep `NOTICE` accurate as modules
       are added.
-- [ ] `README.md` accurate: scope list, the `aGP.seq` claim, the differentiability claim, and the
-      performance section.
+- [x] `README.md` accurate: scope list names the seventeen public names and the ported laGP
+      routines, `aGP.seq` is `emu.refine`, differentiability covers the implicit fit gradients and
+      their active-constraint behaviour, and the performance section states the GPU result plainly
+      alongside the flop reduction. Re-check it whenever a criterion or search is added.
 
 ---
 
@@ -571,5 +611,6 @@ Phase 4  differentiable fitting           done
 Phase 5  MSPE / Fisher / blhs             done
 ```
 
-Every phase has landed and the CI job exists. What is left: the performance levers above and the
-pre-publish checklist.
+Every phase has landed and the CI job exists. The first cross-cutting performance item is done too —
+the MLE no longer inverts `K`. What is left: the remaining levers above, headed by caching the
+candidate cross-covariance across greedy steps, and the pre-publish checklist.

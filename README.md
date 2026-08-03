@@ -86,12 +86,15 @@ The separable (`GPsep`) family of laGP 1.5.9: GP construction, likelihood and pr
 design-derived priors (`darg`/`garg`), lengthscale and nugget MLE/MAP (`mleGPsep`, `jmleGPsep`),
 ALC (`alcGPsep`) with ray and continuous search (`alcrayGPsep`, `alcoptGPsep`), IECI (`ieciGPsep`),
 and the local schemes `laGPsep`, `aGPsep` and `aGP.seq`. Isotropic `GP` routines
-are a special case of the separable ones — pass a scalar `d`. laGP's constrained-optimization
+are a special case of the separable ones — pass a scalar `d` — which is also where laGP keeps MSPE
+(`mspeGP`) and the Fisher-information criterion (`fishGP`), both ported here, along with block Latin
+hypercube subsampling (`blhs`, `blhs.loop`) as `lagpax.bootstrap`. laGP's constrained-optimization
 (`optim.auglag`) and calibration (`fcalib`) layers are out of scope.
 
-The public surface is fourteen names: `GP`, `Prior`, `Range`, `Prediction`, `Fit`, `Local`, `agp`,
-`lagp`, `fit`, `alc`, `ieci`, `nn`, `distance`, `covar`. Everything else stays importable from its
-own module (`lagpax.optim.lbfgsb`, `lagpax.search.ray`, `lagpax.mle.jmle`).
+The public surface is seventeen names: `GP`, `Prior`, `Range`, `Prediction`, `Fit`, `Local`, `agp`,
+`lagp`, `fit`, `alc`, `ieci`, `mspe`, `fisher`, `nn`, `bootstrap`, `distance`, `covar`. Everything
+else stays importable from its own module (`lagpax.optim.lbfgsb`, `lagpax.search.ray`,
+`lagpax.mle.jmle`).
 
 Conventions follow laGP throughout — correlation `exp(-sum_k (x1_k - x2_k)^2 / d_k)`, nugget `g` on
 the diagonal, scale profiled out as `phi = Z' Ki Z`, Student-t predictive. Two deliberate
@@ -131,6 +134,12 @@ single-core laGP by 2-14x but is **not yet consistently faster than 16-core laGP
 across three GPUs spanning a 25x range in fp64 throughput produces only a 2.9x spread in wall clock,
 which says the workload is bound by kernel-launch latency and the sequential ALC greedy loop, not by
 arithmetic. Optimization is ongoing; see `bench/`.
+
+The arithmetic itself is roughly half what it was: the MLE inner loop evaluates the likelihood
+through a Cholesky alone rather than rebuilding the GP, whose explicit `K` inverse only ALC needs.
+By XLA's own cost model one local GP at `end=50` went from 3.21e7 to 1.68e7 flops with ALC design
+selection, and 2.58e7 to 1.04e7 with nearest-neighbour. Design selection, untouched, is now the
+larger half of what remains.
 
 Reproduce with `uv run -m bench.timing` and `uv run -m bench.accuracy`. Note that `bench/common.py`
 pins `OPENBLAS_NUM_THREADS=1` before jax or R load, and that `accuracy.py` hands both sides the same
