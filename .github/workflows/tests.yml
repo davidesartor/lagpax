@@ -1,0 +1,48 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # a skipped test means the R fixture never loaded, so the parity suite compared nothing
+  LAGPAX_STRICT: "1"
+  OPENBLAS_NUM_THREADS: "1"
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "4.4.0"
+          use-public-rspm: true
+
+      - name: Install laGP
+        run: |
+          Rscript -e 'install.packages("laGP")'
+          # CRAN drops packages without warning; fall back to the pinned archive tarball
+          Rscript -e 'if (!requireNamespace("laGP", quietly = TRUE)) install.packages("https://cran.r-project.org/src/contrib/Archive/laGP/laGP_1.5.9.tar.gz", repos = NULL, type = "source")'
+          Rscript -e 'library(laGP); cat(as.character(packageVersion("laGP")), "\n")'
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Sync the tests extra
+        run: uv sync --extra tests
+
+      - name: Run the parity suite
+        env:
+          LAGPAX_R_LIB: "" # laGP lands in R's default library here, not in ~/R/library
+        run: |
+          export R_HOME=$(R RHOME)
+          uv run --no-sync pytest tests -q -rs

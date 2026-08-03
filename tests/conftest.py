@@ -1,9 +1,29 @@
 """Shared fixtures: the R laGP reference and the designs the comparisons run on."""
 
+import os
+
 import numpy as np
 import pytest
 
-R_LIB = "~/R/library"
+R_LIB = os.environ.get("LAGPAX_R_LIB", "~/R/library")
+
+_skipped: set[str] = set()
+
+
+def pytest_runtest_logreport(report):
+    if report.skipped and not hasattr(report, "wasxfail"):
+        _skipped.add(report.nodeid)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Under LAGPAX_STRICT a skip fails the run: it means R never loaded and nothing was compared."""
+    if _skipped and os.environ.get("LAGPAX_STRICT"):
+        session.exitstatus = 1
+        print(
+            f"\nLAGPAX_STRICT: {len(_skipped)} test(s) skipped, so the suite proved nothing:"
+        )
+        for nodeid in sorted(_skipped):
+            print(f"  {nodeid}")
 
 
 class RlaGP:
@@ -43,11 +63,13 @@ def R() -> RlaGP:
     except Exception as e:  # rpy2 missing, or libR not on the loader path
         pytest.skip(f"rpy2 unavailable ({e}); run under `module load r/4.4.0`")
 
-    ro.r(f'.libPaths("{R_LIB}")')
+    # CI installs into R's own default library, so an empty LAGPAX_R_LIB means "leave it alone"
+    if R_LIB:
+        ro.r(f'.libPaths("{R_LIB}")')
     try:
         importr("laGP")
     except Exception as e:
-        pytest.skip(f"laGP not installed in {R_LIB} ({e})")
+        pytest.skip(f"laGP not importable ({e}); looked in {ro.r('.libPaths()')}")
     return RlaGP(ro, numpy2ri)
 
 

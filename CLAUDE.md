@@ -22,7 +22,9 @@ Full checklist with commands is in `ROADMAP.md`. The parts you must not get wron
   the procedure. The stub commits to nothing, so the rename is free until the first real release and
   expensive after it.
 - **CI must fail on a nonzero skip count.** The parity suite is the credibility artifact, and without
-  R + laGP in the runner it goes green having tested almost nothing. **There is no `.github/` yet.**
+  R + laGP in the runner it goes green having tested almost nothing. `.github/workflows/tests.yml`
+  installs R + laGP and sets `LAGPAX_STRICT=1`, which turns any skip into a nonzero exit — keep that
+  env var set, it is the whole point of the job.
 - **Do not weaken the license to MIT/Apache.** See "License" below.
 
 ## What this is
@@ -41,6 +43,7 @@ module load r/4.4.0 && export R_HOME=$(R RHOME)      # needed for rpy2 in tests/
 
 uv sync --extra tests                                 # pytest + rpy2 (rpy2 must stay <3.6)
 uv run --no-sync pytest tests -q                      # parity suite vs R
+LAGPAX_STRICT=1 uv run --no-sync pytest tests -q      # ... and a skip is a failure
 uv run --no-sync pytest tests/test_mle.py -q          # one module
 uv run --no-sync pytest tests/test_gp.py::test_mask_matches_a_smaller_design   # one test
 uv run --no-sync pytest tests -q -k "alc and not mask" # by name
@@ -55,9 +58,10 @@ uv run --no-sync -m bench.plot                        # -> bench/benchmark.png
 whichever extra is currently installed. `tests` and `bench` are separate extras and each `uv sync`
 drops the other, so switching between the suite and the benchmarks means re-syncing.
 
-Without R + laGP reachable, the `R` fixture skips and only `tests/test_transforms.py` (x64, pytree,
-jit/vmap/grad, determinism — the JAX-side properties) actually runs. A green `pytest` proves nothing
-unless R was loaded; check the skip count.
+Without R + laGP reachable, the `R` fixture skips and only the property-test modules run. A green
+`pytest` proves nothing unless R was loaded, so prefix with `LAGPAX_STRICT=1` and a skip becomes a
+nonzero exit rather than something to notice in the summary. CI sets it. `LAGPAX_R_LIB` overrides the
+`~/R/library` search path; empty means "use R's own default library", which is what CI needs.
 
 ## src/lagpax
 

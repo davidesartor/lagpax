@@ -524,10 +524,11 @@ Independent of how far the phases have progressed, except where noted.
       enough; it reserves the name without shipping something you have to support.
 - [ ] **Phase 0 lands before `0.1.0`.** The stub commits to nothing, so the rename is free until the
       first real release and expensive after it.
-- [ ] **CI running the parity suite.** This is the credibility artifact for the package. Needs R +
-      laGP in the runner (`r-lib/actions/setup-r`, then laGP from CRAN). **There is no `.github/`
-      yet** — the suite has only ever run on one machine against `~/R/library`. The CI job must fail
-      on a nonzero skip count, or it will go green without ever loading R.
+- [x] **CI running the parity suite.** `.github/workflows/tests.yml`: `r-lib/actions/setup-r`, laGP
+      from CRAN with a fallback to the pinned `laGP_1.5.9.tar.gz` archive tarball, then the suite
+      under `LAGPAX_STRICT=1`. That env var makes `tests/conftest.py` return a nonzero exit on any
+      skip, which is what stops the job going green without ever loading R. It has not run on GitHub
+      yet — the repo has no remote — so treat the first push as the real check of the R install step.
 - [ ] **Do not weaken the license.** LGPL-2.0-or-later, inherited. Keep `NOTICE` accurate as modules
       are added.
 - [ ] `README.md` accurate: scope list, the `aGP.seq` claim, the differentiability claim, and the
