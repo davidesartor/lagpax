@@ -1,13 +1,49 @@
 """Box-constrained L-BFGS and safeguarded Newton, standing in for R's optim/optimize."""
 
-from typing import Callable, NamedTuple
-from jaxtyping import Array, Float, Int, Scalar
+from typing import Callable, NamedTuple, Optional
+from jaxtyping import Array, Bool, Float, Int, Scalar
 
 import jax
 import jax.numpy as jnp
 
 EPSMCH = float(jnp.finfo(jnp.float64).eps)
 SDEPS = float(jnp.sqrt(EPSMCH))
+
+
+def implicit_argmin(
+    fun: Callable[[Float[Array, "n"]], Scalar],
+    x: Float[Array, "n"],
+    lower: Float[Array, "n"],
+    upper: Float[Array, "n"],
+    free: Optional[Bool[Array, "n"]] = None,
+) -> Float[Array, "n"]:
+    """Give a solver's answer the gradient the argmin has. The value is returned unchanged.
+
+    Both solvers below are `lax.while_loop`s, which reverse-mode cannot differentiate, and
+    unrolling them would differentiate the iterates rather than the answer. Instead: at an
+    interior optimum `grad fun(x) = 0`, so the implicit function theorem moves the argmin
+    with the upstream data as `-H^-1 d(grad fun)/d(upstream)`. One Newton step taken from a
+    frozen `x` has exactly that derivative, and subtracting its own `stop_gradient` leaves
+    the returned value bit-identical to the solver's.
+
+    A coordinate pinned to a bound is not a stationary point, so it stays frozen and its
+    gradient is zero -- the honest answer for an active constraint, not a smooth one. Pass
+    `free` to freeze more than the bounds do; the remaining coordinates then get the
+    derivative of the argmin over them with the frozen ones held fixed, which is what the
+    caller means when the lengthscale came from laGP's boundary reset rather than a solve.
+    """
+    x = jax.lax.stop_gradient(x)
+    interior = (x > lower) & (x < upper)
+    free = interior if free is None else (interior & free)
+
+    H = jax.lax.stop_gradient(jax.hessian(fun)(x))
+    H = jnp.where(free[:, None] & free[None, :], H, jnp.eye(x.shape[0], dtype=x.dtype))
+    step = jnp.linalg.solve(H, jnp.where(free, jax.grad(fun)(x), 0.0))
+
+    # a degenerate Hessian means the optimum is not locally identified; give up on the
+    # gradient rather than propagating a NaN through an otherwise valid prediction
+    step = jnp.where(free & jnp.isfinite(step), step, 0.0)
+    return x - (step - jax.lax.stop_gradient(step))
 
 
 class LbfgsbResult(NamedTuple):

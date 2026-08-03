@@ -244,6 +244,11 @@ def llik_g(gp: GP, g: Scalar, gab=(0.0, 0.0)) -> Scalar:
     return _llik(gp.at(g=g), (0.0, 0.0), gab)
 
 
+def llik_dg(gp: GP, d: Float[Array, "m"], g: Scalar, dab=(0.0, 0.0), gab=(0.0, 0.0)):
+    """llik as a function of both hyperparameters; the objective jmle alternates over."""
+    return _llik(gp.at(d=d, g=g), dab, gab)
+
+
 dllik_d = jax.grad(llik_d, argnums=1)
 dllik_g = jax.grad(llik_g, argnums=1)
 d2llik_g = jax.grad(dllik_g, argnums=1)

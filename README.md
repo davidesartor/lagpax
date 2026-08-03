@@ -12,9 +12,10 @@ thing is one batched XLA call.
 
 - **No local-GP option in JAX.** GPJax and tinygp cover exact and inducing-point GPs; neither does
   local approximation. If your model already lives in JAX, this composes with it.
-- **Differentiable.** `jax.grad` works through prediction. laGP's C/OpenMP implementation cannot do
-  this, and it is what makes local GPs usable inside a larger JAX pipeline — BO loops, gradient-based
-  design, hybrid NN-surrogate models.
+- **Differentiable.** `jax.grad` works through the whole emulator, the local hyperparameter fit
+  included — the optimizers are differentiated implicitly rather than by taping their iterates. laGP's
+  C/OpenMP implementation cannot do this, and it is what makes local GPs usable inside a larger JAX
+  pipeline — BO loops, gradient-based design, hybrid NN-surrogate models.
 - **Parity, not approximation.** The `tests/` suite compares against R's laGP call by call. This is a
   port you can trust to reproduce published laGP results, not a re-derivation that drifts.
 
@@ -43,8 +44,13 @@ out.var    # (500,) predictive variance
 out.Xi     # (500, 50) local design indices, 0-based
 ```
 
-`criterion="nn"` uses nearest neighbours; `criterion="alc"` grows the local design greedily by
-Active Learning Cohn, as in Gramacy & Apley (2015).
+`criterion` and `search` are a grid, not a list of methods. `criterion="nn"` takes nearest
+neighbours, `criterion="alc"` grows the design greedily by Active Learning Cohn (Gramacy & Apley,
+2015), and `criterion=lagpax.ieci(fmin=...)` scores candidates by expected improvement instead of
+variance, for when the emulator serves optimization. `search="exhaustive"` scores every candidate;
+`search="ray"` and `search="continuous"` cost a fixed number of criterion evaluations per greedy
+step regardless of how many candidates there are, which is what makes the scheme usable on large
+datasets. Any callable with the criterion signature `(gp, Xcand, Xref) -> scores` drops in.
 
 Reuse the settings and the design-derived prior across calls by conditioning once:
 
@@ -55,13 +61,31 @@ out = emu.refine(XX, passes=("nn", "alc"))   # warm-start each location from its
 one = emu.local(XX[:1])                      # a single reference set, as laGPsep
 ```
 
-`condition` resolves the prior — the one host-side step — so everything after it is pure JAX.
+`condition` resolves the prior — the one host-side step — so everything after it is pure JAX:
+`jax.jit`, `jax.vmap` over datasets and `jax.grad` all apply to `emu.predict` as a whole.
+
+```python
+prior = lagpax.Prior.from_design(X, Z)                 # resolved once, on the host
+scheme = lagpax.Local(start=6, end=50, search="ray")
+
+def total(Z):
+    return scheme.condition(X, Z, prior=prior).predict(XX).mean.sum()
+
+grad = jax.grad(total)(Z)                              # jax.jit(total) works too
+```
+
+Gradients run through the fitted hyperparameters by the implicit function theorem at the optimum, so
+they cost one small Hessian solve rather than a tape over the optimizer's iterates. A hyperparameter
+resting on a bound — a nugget pinned at its floor on noiseless data, or laGP's `conv=102` lengthscale
+reset — is an active constraint, and its gradient is reported as exactly zero rather than smoothed
+over.
 
 ## Scope
 
 The separable (`GPsep`) family of laGP 1.5.9: GP construction, likelihood and predictive equations,
 design-derived priors (`darg`/`garg`), lengthscale and nugget MLE/MAP (`mleGPsep`, `jmleGPsep`),
-ALC (`alcGPsep`), and the local schemes `laGPsep`, `aGPsep` and `aGP.seq`. Isotropic `GP` routines
+ALC (`alcGPsep`) with ray and continuous search (`alcrayGPsep`, `alcoptGPsep`), IECI (`ieciGPsep`),
+and the local schemes `laGPsep`, `aGPsep` and `aGP.seq`. Isotropic `GP` routines
 are a special case of the separable ones — pass a scalar `d`. laGP's constrained-optimization
 (`optim.auglag`) and calibration (`fcalib`) layers are out of scope.
 

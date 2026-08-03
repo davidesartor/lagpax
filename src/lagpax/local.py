@@ -213,6 +213,10 @@ class Conditioned(NamedTuple):
         inherits per-location lengthscales picks a neighbourhood respecting which dimensions
         matter. Port of laGP's aGP.seq. The first pass only exists to supply lengthscales,
         so `("nn", "alc")` beats `("alc", "alc")` at a fraction of the cost.
+
+        The loop stays Python rather than `lax.scan` because passes may name different
+        criteria, which compile to different functions; it unrolls at trace time, so the
+        whole thing still jits and differentiates as one graph.
         """
         if not passes:
             raise ValueError("passes must name at least one pass")
