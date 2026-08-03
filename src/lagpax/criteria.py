@@ -123,8 +123,10 @@ def ieci(
         s2 = ref.s2 - gp.phi * ktKikx / df
         eci = _student_t_ei(ref.mean, jnp.maximum(s2, 0.0), df, fmin)
 
-        weights = jnp.ones_like(ref.mean) if w is None else w
-        out = jnp.sum(weights * eci, axis=-1) / jnp.sum(weights)
+        # laGP averages over the reference set and lets `w` scale it, rather than
+        # normalizing by sum(w) -- so weights change the magnitude, not only the balance
+        eci = eci if w is None else w * eci
+        out = jnp.mean(eci, axis=-1)
         return jnp.where(mui <= SDEPS, jnp.inf, out)
 
     criterion.minimize = True
@@ -135,6 +137,10 @@ def _named(criterion) -> Criterion:
     """Resolve a criterion name to a function; pass callables through unchanged."""
     if callable(criterion):
         return criterion
+    if criterion == "ieci":
+        raise ValueError(
+            "ieci needs an incumbent: pass criterion=lagpax.ieci(fmin=...)"
+        )
     try:
         return {"alc": alc, "nn": nn}[criterion]
     except KeyError:

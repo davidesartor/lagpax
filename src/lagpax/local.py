@@ -89,7 +89,8 @@ def _design(
     if criterion is nn:
         return jnp.arange(end)
 
-    rect = jnp.stack([jnp.min(Xloc, axis=0), jnp.max(Xloc, axis=0)])
+    # laGP takes the box from the candidates only, after the starting design is removed
+    rect = jnp.stack([jnp.min(Xloc[start:], axis=0), jnp.max(Xloc[start:], axis=0)])
     pos = jnp.concatenate([jnp.arange(start), jnp.zeros(end - start, int)])
     mask = jnp.arange(end) < start
     taken = jnp.arange(cfg.close) < start
@@ -97,7 +98,7 @@ def _design(
     def greedy(t: Scalar, state):
         pos, mask, taken = state
         gp = GP(Xloc[pos], Zloc[pos], d0, g0, mask, trend=cfg.trend)
-        w = search(criterion, gp, Xloc, Xref, taken, t, rect)
+        w = search(criterion, gp, Xloc, Xref, taken, t - start, rect)
         return pos.at[t].set(w), mask.at[t].set(True), taken.at[w].set(True)
 
     pos, _, _ = jax.lax.fori_loop(start, end, greedy, (pos, mask, taken))
