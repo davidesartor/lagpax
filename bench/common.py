@@ -67,13 +67,13 @@ class RlaGP:
                 self.ro.globalenv[name] = cv.py2rpy(np.asarray(value))
             return cv.rpy2py(self.ro.r(script))
 
-    def agpsep(self, X, Z, XX, start: int, end: int, method: str, d=None):
+    def agp(self, X, Z, XX, start: int, end: int, method: str, d=None):
         """Run aGPsep and return (mean, var), with laGP doing its own timing internally."""
         # darg subsamples with R's RNG when n > 1000, so parity runs must supply d explicitly
         arg = ""
         if d is not None:
             self(
-                f"dprior <- list(start=dstart, mle={'TRUE' if d.mle else 'FALSE'}, "
+                f"dprior <- list(start=dstart, mle={'TRUE' if d.estimate else 'FALSE'}, "
                 "min=dmin, max=dmax, ab=dab)",
                 dstart=np.atleast_1d(d.start),
                 dmin=np.array([d.min]),

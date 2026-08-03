@@ -29,7 +29,7 @@ class RlaGP:
         start = ",".join(repr(float(v)) for v in np.atleast_1d(d.start))
         return (
             f"list(start=c({start}), min={d.min!r}, max={d.max!r}, "
-            f"mle={'TRUE' if d.mle else 'FALSE'}, ab=c({d.ab[0]!r},{d.ab[1]!r}))"
+            f"mle={'TRUE' if d.estimate else 'FALSE'}, ab=c({d.ab[0]!r},{d.ab[1]!r}))"
         )
 
 

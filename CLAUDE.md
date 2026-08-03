@@ -2,30 +2,28 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+Three documents, with distinct jobs — keep them in sync, don't duplicate across them:
+
+- **`CLAUDE.md`** (this file) — how the repo works, why things are the way they are, what the target
+  API is, and the capability inventory. Loaded into context every session.
+- **`ROADMAP.md`** — the execution plan: phases, acceptance criteria, transcribed laGP reference
+  algorithms. Written to be handed to an agent working unsupervised.
+- **`README.md`** — the user-facing pitch. Currently stale in places; see the checklist below.
+
 ## Before publishing — do these first
 
-- **Email Bobby (Robert Gramacy, rbg@vt.edu) before any public release.** `lagpax` is a translation of
-  his laGP source, not a clean-room reimplementation. LGPL-2.0-or-later covers it legally; the email
-  is about doing it right, and he is a plausible JOSS co-author or reviewer. Do this *before* the
-  first PyPI upload, not after.
-- **Reserve `lagpax` on PyPI with a placeholder upload.** Plain `lagp` was already squatted by an
-  unrelated LLM-proxy project, so the name is not safe just because it is free today.
+Full checklist with commands is in `ROADMAP.md`. The parts you must not get wrong from memory:
 
-  ```bash
-  uv build && uv publish        # needs UV_PUBLISH_TOKEN, or --token
-  ```
-
-  Ship the placeholder as **version `0.0.1`**, not `0.1.0`. PyPI never lets a version number be
-  reused — deleting a release does not free its filename — so burning `0.1.0` on a stub would cost
-  the real first release its natural number.
-
-  The placeholder should be a **stub with no laGP-derived code in it** — a `__init__.py` with a
-  version string and a README pointing at the GitHub repo. That reserves the name without publicly
-  releasing the port, so it does not front-run the email to Bobby above. Publish the real package
-  only after that conversation.
-- CI running the parity suite is the credibility artifact for this package. Needs R + laGP in the
-  runner (`r-lib/actions/setup-r`, then laGP from CRAN).
-- Do not weaken the license to MIT/Apache. See "License" below.
+- **The PyPI placeholder ships as `0.0.1`, never `0.1.0`.** PyPI never lets a version number be
+  reused and deleting a release does not free its filename, so burning `0.1.0` on a stub costs the
+  real first release its natural number. Reserving the name matters: plain `lagp` was already
+  squatted by an unrelated LLM-proxy project, so `lagpax` being free today proves nothing.
+- **Land the API rename before `0.1.0`.** See "## API" for the target and `ROADMAP.md` Phase 0 for
+  the procedure. The stub commits to nothing, so the rename is free until the first real release and
+  expensive after it.
+- **CI must fail on a nonzero skip count.** The parity suite is the credibility artifact, and without
+  R + laGP in the runner it goes green having tested almost nothing. **There is no `.github/` yet.**
+- **Do not weaken the license to MIT/Apache.** See "License" below.
 
 ## What this is
 
@@ -39,13 +37,27 @@ The pitch is nonstationarity + differentiability + verified parity, not raw spee
 ## Commands
 
 ```bash
-module load r/4.4.0 && export R_HOME=$(R RHOME)   # needed for rpy2 in tests/benchmarks
-uv sync --extra tests                              # pytest + rpy2 (rpy2 must stay <3.6)
-uv run --no-sync pytest tests -q                   # parity suite vs R
-uv run -m bench.accuracy                           # JAX vs laGP predictions -> bench/accuracy.csv
-uv run -m bench.timing                             # wall clock -> bench/timing.csv
-uv run -m bench.plot                               # -> bench/benchmark.png
+module load r/4.4.0 && export R_HOME=$(R RHOME)      # needed for rpy2 in tests/benchmarks
+
+uv sync --extra tests                                 # pytest + rpy2 (rpy2 must stay <3.6)
+uv run --no-sync pytest tests -q                      # parity suite vs R
+uv run --no-sync pytest tests/test_mle.py -q          # one module
+uv run --no-sync pytest tests/test_gp.py::test_mask_matches_a_smaller_design   # one test
+uv run --no-sync pytest tests -q -k "alc and not mask" # by name
+
+uv sync --extra bench                                 # + matplotlib/pandas; NOT in the tests extra
+uv run --no-sync -m bench.accuracy                    # JAX vs laGP predictions -> bench/accuracy.csv
+uv run --no-sync -m bench.timing                      # wall clock -> bench/timing.csv
+uv run --no-sync -m bench.plot                        # -> bench/benchmark.png
 ```
+
+`--no-sync` on every `uv run` is load-bearing: a bare `uv run` re-syncs the default env and prunes
+whichever extra is currently installed. `tests` and `bench` are separate extras and each `uv sync`
+drops the other, so switching between the suite and the benchmarks means re-syncing.
+
+Without R + laGP reachable, the `R` fixture skips and only `tests/test_transforms.py` (x64, pytree,
+jit/vmap/grad, determinism — the JAX-side properties) actually runs. A green `pytest` proves nothing
+unless R was loaded; check the skip count.
 
 ## src/lagpax
 
@@ -67,6 +79,13 @@ the diagonal, zero mean, scale profiled out as `phi = Z' Ki Z`, Student-t predic
 - `local.py` — `lagpsep`/`agpsep`. `_lagpsep_core` is jitted with the sizes static; `agpsep` maps it
   over predictive locations with `jax.lax.map(batch_size=)`.
 
+The public API is flat: `__init__.py` re-exports every name and pins them in `__all__`, so a new
+public function has to be added in two places there. Importing the package has a global side effect —
+`jax.config.update("jax_enable_x64", True)` runs at import time, for the whole process.
+
+**These names are being replaced — see "## API" below.** That section is the target, not the current
+state; the module layout above stays, the exported names do not.
+
 ### Why the mask exists
 
 Greedy ALC design selection grows the local design one point at a time, but XLA needs fixed shapes.
@@ -82,6 +101,256 @@ and `tests/test_alc.py::test_alc_ignores_masked_rows` are the guards.
 - `Xi` is 1-based in R, 0-based here.
 - `darg`/`garg` subsample the design when `n > 1000` using R's RNG, so parity tests stay under 1000.
 - `dllikGPsep` is not exported from the laGP namespace; call it as `laGP:::dllikGPsep`.
+
+## API
+
+**Planned, not built.** The names in the repo today mirror laGP's C entry points — `new_gpsep`,
+`mle_gpsep_d`, `alc_gpsep`, `agpsep`. That was the right call while parity was the only goal, and it
+does not survive the roadmap. laGP's own naming already broke under the same pressure: `alcGPsep`,
+`alcrayGPsep`, `alcoptGPsep` are one criterion crossed with three searches spelled as three
+functions, and adding MSPE, IECI and Fisher to that grid means twelve. Do the rename **before
+`0.1.0`** — only a stub is on PyPI, nothing depends on the current names, so there are no aliases and
+no deprecation window. After the first real release this gets expensive.
+
+### 1. The GP
+
+`GP` stays a NamedTuple pytree and gains methods, instead of free functions carrying a type suffix.
+`sep` disappears everywhere: separable is the only family shipping, and isotropic is `d` broadcast.
+
+```python
+gp = lagpax.GP(X, Z, d, g, mask=None)
+gp.llik(prior=None)                      # MAP when a prior is passed, MLE otherwise
+gp.predict(XX, lite=True, nugget=True)
+gp.update(Xnew, Znew)
+gp.at(d=..., g=...)                      # was newparams_gpsep
+```
+
+### 2. Priors
+
+`darg`/`garg` are R argument-checking names. They become one object holding both, because every call
+site needs both:
+
+```python
+prior = lagpax.Prior.from_design(X, Z, rng=None)          # -> Prior(d=Range(...), g=Range(...))
+prior = prior.at(g=lagpax.Range(start=1e-6, estimate=False))
+```
+
+Resolving the prior is the only host-side numpy/scipy step in the whole pipeline. Making it an
+explicit up-front argument is what lets everything downstream be pure JAX — that is the shape the
+"compilable pipeline" roadmap item needs, and it is not a cosmetic change. It is also the slot
+block-bootstrap subsampling plugs into later, and the thing `bench/accuracy.py` currently has to
+share between the two sides by hand.
+
+### 3. Criteria
+
+Uniform signature, `(gp, Xcand, Xref) -> Float[Array, "ncand"]`. Anything with that signature is a
+criterion, which is the "build your own" story the roadmap promises:
+
+```python
+lagpax.alc(gp, Xcand, Xref)
+lagpax.mspe(gp, Xcand, Xref)
+lagpax.ieci(fmin=...)(gp, Xcand, Xref)   # criteria needing config are factories
+```
+
+### 4. The local scheme
+
+Configuration separate from data; criterion separate from search.
+
+```python
+scheme = lagpax.Local(
+    start=6, end=50,
+    criterion="alc",        # "nn" | "alc" | "mspe" | "ieci" | "fisher" | any callable
+    search="exhaustive",    # "exhaustive" | "ray" | "continuous"
+    trend="zero",           # "zero" | "constant" | "linear"; "zero" reproduces laGP
+    close=None, maxit=100,
+)
+emu = scheme.condition(X, Z, prior=None, rng=None)
+out = emu.predict(XX, batch=64)
+out = emu.refine(XX, passes=("nn", "alc"))
+```
+
+Plus one-shot wrappers for the common case, thin over the above:
+
+```python
+lagpax.agp(X, Z, XX, **opts)       # whole dataset
+lagpax.lagp(X, Z, Xref, **opts)    # one location — data first, matching agp
+```
+
+Why split it: `criterion x search` is a grid, not a list of methods, and `method="alcray"` is how
+laGP ended up with its name explosion. `close` is meaningful only for `search="exhaustive"`; ray and
+continuous search ignore it. `condition` resolves the prior once, ahead of any JAX work. `refine`
+replaces `agpsep_seq`'s `**kwargs` forwarding, which is exactly where the `d`-resolution bug lived.
+
+### 5. Output
+
+One `Prediction` type for both entry points, ending laGP's split where `laGPsep` returns raw `s2` and
+`aGPsep` returns `s2 * df/(df-2)`:
+
+```python
+out.mean, out.s2, out.df
+out.var          # property: s2 * df / (df - 2)
+out.Xi           # local design indices, 0-based
+out.fit          # Fit(d, g, its, conv) — a typed struct, not the current dict
+```
+
+The name-by-name rename table, the module layout it lands in, and the snapshot-first procedure for
+executing it are in `ROADMAP.md` Phase 0.
+
+### What leaves the public surface
+
+`lbfgsb`, `bracketed_newton`, `covar_sep_symm`, `diff_covar_sep`, `igamma_inv`, `get_ds`,
+`dllik_gpsep_d`, `dllik_gpsep_g` and the four `mle_*` entry points. All stay importable from their
+own modules — the parity suite compares values, not names, and `tests/` can reach into `lagpax.optim`
+directly — they just stop being part of a 30-name `__all__` that has to be edited in two places for
+every addition. Target public surface is ~14 names: `GP`, `Prior`, `Range`, `Prediction`, `Fit`,
+`Local`, `agp`, `lagp`, `fit`, `alc`, `mspe`, `ieci`, `distance`, `covar`.
+
+`jax.config.update("jax_enable_x64", True)` at import stays. A process-global side effect from
+importing a library is rude, but every tolerance in `tests/` assumes it and laGP is float64
+throughout.
+
+## Roadmap
+
+`ROADMAP.md` is the execution plan — phases, file-by-file design, acceptance criteria, transcribed
+laGP reference algorithms — written to be handed to an agent working unsupervised. This section is
+the capability inventory it derives from; keep the two in sync.
+
+What gets ported is laGP's **capability list, not its API**. The R surface is shaped by C-handle
+bookkeeping, two parallel type families and R's optimizer set, none of which is worth carrying into
+JAX. Below is what laGP can actually do, and where the port stands on each.
+
+Testing strategy is deliberately deferred — build first. Note only that parity with R stops being a
+whole-package property once anything divergent ships, and becomes a property of the laGP-equivalent
+configuration.
+
+### Working with a GP directly
+
+Everything the local scheme is assembled from is also usable on its own, which is how a user builds
+a criterion or a workflow laGP does not have.
+
+- **Build a GP on a design and query it** — covariance, log likelihood, predictive equations.
+  *Shipped.*
+- **Design-derived priors and ranges for the lengthscale and nugget**, so a fit on a few dozen points
+  is well posed without the user inventing bounds. Usable standalone, and worth reusing across calls
+  since it subsamples with an RNG. *Shipped.*
+- **Score candidate points by ALC against a reference set**, outside any greedy loop. *Shipped.*
+- **Derivatives of the likelihood and of the ALC criterion.** laGP ships hand-written derivative
+  routines for both; here they fall out of autodiff, so they cost nothing to maintain and extend to
+  anything else differentiable. *Shipped.*
+- **Append observations to an existing GP.** *Shipped*, but it rebuilds rather than applying the
+  rank-1 update laGP uses — correct, and a performance item rather than a capability gap.
+- **Fixed-shape padded designs**, so a local design that grows one point at a time still compiles and
+  batches. Not a laGP concept at all; it is what makes the greedy loop work under XLA. *Shipped.*
+
+### Choosing the local design
+
+The core of the method: given a predictive location, pick a few dozen points out of a huge dataset to
+build a tiny exact GP on. Which points you pick is the whole ballgame.
+
+- **Nearest neighbours** — take the closest points. Cheapest, and a surprisingly strong baseline.
+  *Shipped.*
+- **ALC (Active Learning Cohn)** — grow the design one point at a time, each time adding whichever
+  candidate most reduces predictive variance at the location being predicted. Better designs than
+  nearest-neighbour because it will reach for points that brace the prediction rather than crowd it.
+  laGP's default and the reason the method works. *Shipped.*
+- **MSPE** — ALC's variance reduction plus the extra error incurred from re-estimating the
+  lengthscale once the point is added. Slightly better designs at appreciably more cost. *Missing;
+  low priority — the accuracy gain over ALC is small.*
+- **IECI (integrated expected conditional improvement)** — score a candidate by how much it improves
+  the prospect of finding an optimum rather than how much it reduces variance. The criterion to use
+  when the emulator serves optimization instead of prediction. *Missing; the one that makes the
+  package useful for Bayesian optimization.*
+- **Fisher-information criterion** — pick the point that most sharpens the *hyperparameter* estimate
+  rather than the prediction. Useful when the local fit is unstable. *Missing; low priority.*
+- **Ray search** — instead of scoring every candidate at every greedy step, search along rays
+  emanating from the predictive location. Turns the dominant cost from linear in dataset size into
+  something nearly independent of it. This is what makes laGP usable at millions of rows. *Missing;
+  the biggest scalability item.*
+- **Continuous search** — optimize the criterion over the input space directly and snap to the
+  nearest candidate. Same cost saving as ray search, and it can *place* a point rather than only
+  choose one, which matters for sequential design. *Missing.*
+
+### Fitting the local model
+
+- **Per-location lengthscale and nugget estimation**, with priors derived from the design so every
+  tiny local fit is well posed. This is what makes the emulator nonstationary — each prediction gets
+  its own lengthscales. *Shipped.*
+- **Joint lengthscale/nugget estimation**, alternating until both settle. *Shipped.*
+- **Choosing which hyperparameters are estimated and which are held fixed**, including the common
+  case of a known noise level. *Shipped.*
+- **MAP rather than MLE** — the design-derived Gamma priors act as two-sided barriers, which is what
+  keeps a fit on a few dozen points from running off to a degenerate lengthscale. *Shipped.*
+- **Anisotropic (separable) and isotropic correlation.** Separable is shipped; isotropic is a special
+  case of it and needs no separate work.
+
+### Predicting
+
+- **Student-t predictive distribution**, pointwise variances or a full joint covariance over
+  predictive locations. *Shipped.*
+- **Prediction without the nugget**, for interpolating the underlying function rather than a noisy
+  observation of it. *Shipped.*
+- **Differentiable prediction** — gradients of the mean and variance with respect to the predictive
+  location, with hyperparameters held fixed. Not something laGP can do, and the reason the emulator
+  composes with the rest of a JAX program. *Shipped;* see "Beyond laGP" for the part that is not.
+- **Simple kriging only** — zero mean, no trend. See "Beyond laGP" below.
+
+### Applying it to a whole dataset
+
+- **One predictive location** — build a local design, fit it, predict. *Shipped.*
+- **Many predictive locations, independently** — the actual user-facing entry point, and where the
+  method earns its speed, since every location is separable work. *Shipped.*
+- **Iterated refinement** — run the whole thing once, then run it again with each location starting
+  from the lengthscales the first pass fitted there. Design selection scores candidates at the
+  *starting* lengthscale, so the second pass picks neighbourhoods that respect which dimensions
+  matter instead of treating all of them alike. *Shipped* (`agpsep_seq`). On a strongly anisotropic
+  4-d problem it cuts rmse ~1.7-2x, and `("nn", "alc")` beats `("alc", "alc")` — the first pass only
+  exists to supply lengthscales, so paying for ALC there buys little.
+- **Cluster and thread parallelism.** *Not shipping* — XLA decides.
+
+### Global hyperparameter estimation on big data
+
+- **Block-bootstrap subsampling** — estimate one global lengthscale from many small subsamples of a
+  huge design, as a starting point or a fixed prior for the local fits. *Missing; low priority.*
+- **Random line sampling** for visual diagnostics. *Not shipping.*
+
+### Built on top of the GP, in laGP but out of scope here
+
+- **Constrained blackbox optimization** (augmented Lagrangian, expected improvement and expected
+  feasible improvement drivers). A separate package's job; JAX users already have optimizers.
+- **Computer-model calibration** (discrepancy estimation and calibration objectives). A distinct
+  research workflow, not part of the emulator.
+
+### Beyond laGP
+
+Two things laGP cannot do that are worth shipping anyway:
+
+- **Trend models.** laGP is simple kriging everywhere, so the user must center their own response and
+  the intervals omit the uncertainty in the mean. Adding a constant or linear trend, off by default,
+  buys better-calibrated intervals — especially at design boundaries and on one-sided local
+  neighbourhoods. Sold as calibration, not as a better mean.
+- **Gradients through fitting, and a compilable pipeline.** Prediction is differentiable today, but
+  only with hyperparameters held fixed, and the fitting stage escapes to the host mid-call. Closing
+  that makes the emulator an ordinary JAX function that can be nested inside a larger model — which
+  is the differentiability claim the README already makes.
+
+### Order
+
+```
+Phase 0  API rename                  blocking; nothing may precede it
+Phase 1  ray + continuous search     biggest scalability gain
+Phase 2  IECI                        makes it a BO surrogate
+Phase 3  trend models                independent
+Phase 4  differentiable fitting      independent
+Phase 5  MSPE / Fisher / blhs        last, or never
+```
+
+Iterated refinement is done. The rename goes first because every item below adds a criterion, a
+search or a flag, and each one landed against the current names is another call site to migrate
+later. Phases 3 and 4 do not depend on 1 or 2 and can be reordered freely. `ROADMAP.md` has the
+per-phase design, acceptance criteria and laGP reference algorithms.
+
+The pre-publish checklist is unaffected by any of this — the PyPI placeholder should happen
+regardless of progress, and a `0.0.1` stub locks in no API.
 
 ## tests/
 
@@ -137,5 +406,8 @@ added.
 
 - A bare `uv sync` prunes the `tests` extra, and rpy2 then dies with
   `ModuleNotFoundError: No module named '_cffi_backend'`. Re-run `uv sync --extra tests`.
+- `uv.lock` is in `.gitignore`, so nothing is pinned across machines and a fresh `uv sync` resolves
+  current versions. The `rpy2>=3.5.17,<3.6` bound in `pyproject.toml` is the only guard — do not
+  relax it while resolving something else.
 - Piping a long background run through `tail` buffers everything until it exits, so the output file
   stays empty. Let it write its CSV and read that instead.

@@ -1,6 +1,10 @@
-"""Lengthscale/nugget priors and ranges, port of laGP's prior.R (darg/garg)."""
+"""Design-derived lengthscale/nugget ranges and priors, port of laGP's prior.R.
 
-from typing import NamedTuple, Optional
+The only host-side numpy/scipy step in the package. It runs once per pipeline, and R's
+`quantile` type 7 is numpy's default, so it is deliberately not jitted.
+"""
+
+from typing import Mapping, NamedTuple, Optional, Union
 
 import numpy as np
 import scipy as sp
@@ -8,24 +12,73 @@ import scipy as sp
 SDEPS = float(np.sqrt(np.finfo(float).eps))
 
 
-class Darg(NamedTuple):
-    """laGP `darg` output: starting value, box, whether to MLE, and Gamma prior (a, b)."""
+class Range(NamedTuple):
+    """Start value, box, Gamma prior `(a, b)`, and whether to estimate the parameter.
 
-    start: np.ndarray
-    min: float
-    max: float
-    mle: bool
-    ab: tuple[float, float]
+    Fields left as `None` are filled in by `Prior.at`, which is what makes a partial
+    `Range(start=1e-6, estimate=False)` a usable override.
+    """
+
+    start: Union[float, np.ndarray, None] = None
+    min: Optional[float] = None
+    max: Optional[float] = None
+    ab: Optional[tuple[float, float]] = None
+    estimate: Optional[bool] = None
+
+    def merge(self, other: "Range") -> "Range":
+        """`other` wins field by field, ignoring the fields it leaves unset."""
+        return Range(*(o if o is not None else s for s, o in zip(self, other)))
+
+    def check(self) -> None:
+        """Port of laGP's check.arg validation."""
+        if self.max <= 0:
+            raise ValueError("max should be a positive scalar")
+        if self.min < 0 or self.min > self.max:
+            raise ValueError("min should be a positive scalar < max")
+        start = np.asarray(self.start)
+        if np.any(start < self.min) or np.any(start > self.max):
+            raise ValueError("start should lie in [min, max]")
+        if len(self.ab) != 2 or any(v < 0 for v in self.ab):
+            raise ValueError("ab should be a positive 2-vector")
 
 
-class Garg(NamedTuple):
-    """laGP `garg` output: starting value, box, whether to MLE, and Gamma prior (a, b)."""
+Spec = Union[float, np.ndarray, Mapping, Range, None]
 
-    start: float
-    min: float
-    max: float
-    mle: bool
-    ab: tuple[float, float]
+
+class Prior(NamedTuple):
+    """Lengthscale and nugget ranges together, since every call site needs both."""
+
+    d: Range
+    g: Range
+
+    @classmethod
+    def from_design(
+        cls,
+        X: np.ndarray,
+        Z: np.ndarray,
+        d: Spec = None,
+        g: Spec = 1 / 10000,
+        samp_size: int = 1000,
+        rng: Optional[np.random.Generator] = None,
+    ) -> "Prior":
+        """laGP's darg + garg. `g` defaults to laGPsep/aGPsep's nugget, not to garg's."""
+        return cls(d=darg(d, X, samp_size=samp_size, rng=rng), g=garg(g, Z))
+
+    def at(self, d: Spec = None, g: Spec = None) -> "Prior":
+        """Override fields of either range, leaving everything unset as it was."""
+        return Prior(
+            d=self.d.merge(_as_range(d)) if d is not None else self.d,
+            g=self.g.merge(_as_range(g)) if g is not None else self.g,
+        )
+
+
+def _as_range(spec: Spec) -> Range:
+    """Accept a Range, a mapping of field names, or a bare starting value."""
+    if isinstance(spec, Range):
+        return spec
+    if isinstance(spec, Mapping):
+        return Range(**{("estimate" if k == "mle" else k): v for k, v in spec.items()})
+    return Range(start=spec)
 
 
 def igamma_inv(a: float, y: float, lower: bool = False) -> float:
@@ -54,91 +107,66 @@ def get_ds(
     return float(np.quantile(D, p)), float(D.min()), float(D.max())
 
 
+def _gamma_ab(scale: float) -> tuple[float, float]:
+    """laGP's default Gamma(1.5, b), with b placing 95% of the mass below `scale`."""
+    return 1.5, igamma_inv(1.5, 0.95 * sp.special.gamma(1.5), lower=True) / scale
+
+
 def darg(
-    d: float | np.ndarray | dict | None,
+    d: Spec,
     X: np.ndarray,
     samp_size: int = 1000,
     rng: Optional[np.random.Generator] = None,
-) -> Darg:
+) -> Range:
     """Default lengthscale start/range/prior from the design, matching laGP's darg."""
-    d = (
-        {}
-        if d is None
-        else ({"start": d} if np.isscalar(d) or isinstance(d, np.ndarray) else dict(d))
-    )
-    mle = d.get("mle", True)
+    spec = _as_range(d)
+    estimate = True if spec.estimate is None else bool(spec.estimate)
 
-    needs_ds = "start" not in d or (
-        mle and ("max" not in d or "min" not in d or "ab" not in d)
+    needs_ds = spec.start is None or (
+        estimate and (spec.max is None or spec.min is None or spec.ab is None)
     )
     start_q, dmin_q, dmax_q = (
         get_ds(X, samp_size=samp_size, rng=rng) if needs_ds else (0.0, 0.0, 0.0)
     )
 
-    start = np.atleast_1d(np.asarray(d.get("start", start_q), float))
-    dmax = float(d["max"]) if "max" in d else (dmax_q if mle else float(start.max()))
-    if "min" in d:
-        dmin = float(d["min"])
+    start = np.atleast_1d(
+        np.asarray(start_q if spec.start is None else spec.start, float)
+    )
+    if spec.max is not None:
+        dmax = float(spec.max)
     else:
-        dmin = max(dmin_q / 2.0 if mle else float(start.min()), SDEPS)
+        dmax = dmax_q if estimate else float(start.max())
+    if spec.min is not None:
+        dmin = float(spec.min)
+    else:
+        dmin = max(dmin_q / 2.0 if estimate else float(start.min()), SDEPS)
+    if spec.ab is not None:
+        ab = tuple(float(v) for v in spec.ab)
+    else:
+        ab = _gamma_ab(dmax_q) if estimate else (0.0, 0.0)
 
-    ab = (
-        tuple(d["ab"])
-        if "ab" in d
-        else (
-            (0.0, 0.0)
-            if not mle
-            else (
-                1.5,
-                igamma_inv(1.5, 0.95 * sp.special.gamma(1.5), lower=True) / dmax_q,
-            )
-        )
-    )
-
-    out = Darg(
-        start=start, min=dmin, max=dmax, mle=bool(mle), ab=(float(ab[0]), float(ab[1]))
-    )
-    _check_arg(out)
+    out = Range(start=start, min=dmin, max=dmax, ab=ab, estimate=estimate)
+    out.check()
     return out
 
 
-def garg(g: float | dict | None, y: np.ndarray) -> Garg:
+def garg(g: Spec, Z: np.ndarray) -> Range:
     """Default nugget start/range/prior from the responses, matching laGP's garg."""
-    g = {} if g is None else ({"start": g} if np.isscalar(g) else dict(g))
-    mle = g.get("mle", False)
+    spec = _as_range(g)
+    estimate = False if spec.estimate is None else bool(spec.estimate)
 
-    y = np.asarray(y, float)
-    r2s = np.square(y - y.mean())
-
-    start = float(g["start"]) if "start" in g else float(np.quantile(r2s, 0.025))
-    gmax = float(g["max"]) if "max" in g else (float(r2s.max()) if mle else start)
-    gmin = float(g["min"]) if "min" in g else SDEPS
-
-    if "ab" in g:
-        ab = tuple(g["ab"])
-    elif not mle:
-        ab = (0.0, 0.0)
+    r2s = np.square(np.asarray(Z, float) - np.asarray(Z, float).mean())
+    start = float(np.quantile(r2s, 0.025) if spec.start is None else spec.start)
+    if spec.max is not None:
+        gmax = float(spec.max)
     else:
-        ab = (
-            1.5,
-            igamma_inv(1.5, 0.95 * sp.special.gamma(1.5), lower=True)
-            / float(r2s.mean()),
-        )
+        gmax = float(r2s.max()) if estimate else start
+    gmin = SDEPS if spec.min is None else float(spec.min)
+    if spec.ab is not None:
+        ab = tuple(float(v) for v in spec.ab)
+    else:
+        ab = _gamma_ab(float(r2s.mean())) if estimate else (0.0, 0.0)
 
-    out = Garg(
-        start=start, min=gmin, max=gmax, mle=bool(mle), ab=(float(ab[0]), float(ab[1]))
-    )
-    _check_arg(out)
+    out = Range(start=start, min=gmin, max=gmax, ab=ab, estimate=estimate)
+    out.check()
     return out
-
-
-def _check_arg(a: Darg | Garg) -> None:
-    """Port of laGP's check.arg validation."""
-    if a.max <= 0:
-        raise ValueError("max should be a positive scalar")
-    if a.min < 0 or a.min > a.max:
-        raise ValueError("min should be a positive scalar < max")
-    if np.any(np.asarray(a.start) < a.min) or np.any(np.asarray(a.start) > a.max):
-        raise ValueError("start should lie in [min, max]")
-    if len(a.ab) != 2 or any(v < 0 for v in a.ab):
-        raise ValueError("ab should be a positive 2-vector")

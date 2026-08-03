@@ -26,12 +26,14 @@ def jax_backend() -> str:
 def bench_jax(case, seed, method, batch):
     import jax
 
-    from src import lagp
+    import lagpax as lagp
 
     X, Z, XX = design(seed=seed, **case)
 
     def run():
-        out = lagp.agpsep(X, Z, XX, start=START, end=END, method=method, batch=batch)
+        out = lagp.agp(
+            X, Z, XX, start=START, end=END, criterion=method, batch=batch
+        )
         return jax.block_until_ready(out)
 
     return timeit(run)[0]
@@ -39,7 +41,7 @@ def bench_jax(case, seed, method, batch):
 
 def bench_lagp(R, case, seed, method):
     X, Z, XX = design(seed=seed, **case)
-    return timeit(lambda: R.agpsep(X, Z, XX, START, END, method), repeat=1)[0]
+    return timeit(lambda: R.agp(X, Z, XX, START, END, method), repeat=1)[0]
 
 
 def run(methods, batch, skip_r, out="timing.csv") -> pd.DataFrame:

@@ -2,62 +2,36 @@
 
 Everything here is float64 and follows laGP's parameterization: the correlation is
 `exp(-sum_k (x1_k - x2_k)^2 / d_k)` with nugget `g` on the diagonal, the process is
-zero-mean, and the scale is profiled out (`phi = Z' Ki Z`).
+zero-mean unless a trend is asked for, and the scale is profiled out (`phi = Z' Ki Z`).
+
+The public surface is deliberately small. Everything else stays importable from its own
+module -- `lagpax.optim.lbfgsb`, `lagpax.covar.dcovar`, `lagpax.mle.jmle`, `lagpax.search.ray`.
 """
 
 import jax
 
 jax.config.update("jax_enable_x64", True)
 
-from .alc import alc_gpsep
-from .covar import covar_sep, covar_sep_symm, diff_covar_sep, distance
-from .gp import (
-    SDEPS,
-    GPsep,
-    Prediction,
-    dllik_gpsep_d,
-    dllik_gpsep_g,
-    llik_gpsep,
-    new_gpsep,
-    newparams_gpsep,
-    pred_gpsep,
-    update_gpsep,
-)
-from .local import AGP, LaGP, agpsep, lagpsep
-from .mle import jmle_gpsep, mle_gpsep_d, mle_gpsep_nug, mle_switch
-from .optim import bracketed_newton, lbfgsb
-from .prior import Darg, Garg, darg, garg, get_ds, igamma_inv
+from .covar import covar, distance
+from .criteria import alc, ieci, nn
+from .gp import GP, Prediction
+from .local import Local, agp, lagp
+from .mle import Fit, fit
+from .prior import Prior, Range
 
 __all__ = [
-    "SDEPS",
-    "AGP",
-    "Darg",
-    "GPsep",
-    "Garg",
-    "LaGP",
+    "GP",
+    "Fit",
+    "Local",
     "Prediction",
-    "agpsep",
-    "alc_gpsep",
-    "bracketed_newton",
-    "covar_sep",
-    "covar_sep_symm",
-    "darg",
-    "diff_covar_sep",
+    "Prior",
+    "Range",
+    "agp",
+    "alc",
+    "covar",
     "distance",
-    "dllik_gpsep_d",
-    "dllik_gpsep_g",
-    "garg",
-    "get_ds",
-    "igamma_inv",
-    "jmle_gpsep",
-    "lagpsep",
-    "lbfgsb",
-    "llik_gpsep",
-    "mle_gpsep_d",
-    "mle_gpsep_nug",
-    "mle_switch",
-    "new_gpsep",
-    "newparams_gpsep",
-    "pred_gpsep",
-    "update_gpsep",
+    "fit",
+    "ieci",
+    "lagp",
+    "nn",
 ]

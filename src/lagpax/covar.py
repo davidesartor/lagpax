@@ -15,7 +15,7 @@ def distance(
     return jnp.sum(jnp.square(X1[:, None, :] - X2[None, :, :]), axis=-1)
 
 
-def covar_sep(
+def covar(
     d: Float[Array, "m"],
     X1: Float[Array, "n1 m"],
     X2: Float[Array, "n2 m"],
@@ -24,17 +24,17 @@ def covar_sep(
     return jnp.exp(-jnp.sum(jnp.square(X1[:, None, :] - X2[None, :, :]) / d, axis=-1))
 
 
-def covar_sep_symm(
+def covar_symm(
     d: Float[Array, "m"],
     X: Float[Array, "n m"],
     g: Scalar,
 ) -> Float[Array, "n n"]:
-    """covar_sep(d, X, X) with the nugget g added to the diagonal."""
-    K = covar_sep(d, X, X)
+    """covar(d, X, X) with the nugget g added to the diagonal."""
+    K = covar(d, X, X)
     return jnp.fill_diagonal(K, 1.0 + g, inplace=False)
 
 
-def diff_covar_sep(
+def dcovar(
     d: Float[Array, "m"],
     X1: Float[Array, "n1 m"],
     X2: Float[Array, "n2 m"],

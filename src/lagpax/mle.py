@@ -6,40 +6,40 @@ from jaxtyping import Array, Float, Int, Scalar
 import jax
 import jax.numpy as jnp
 
-from .gp import GPsep, d2llik_gpsep_g, dllik_gpsep_g, llik_d, llik_g, newparams_gpsep
+from .gp import GP, d2llik_g, dllik_g, llik_d
 from .optim import bracketed_newton, lbfgsb
+from .prior import Prior
+
+
+class Fit(NamedTuple):
+    """Fitted hyperparameters plus the lengthscale optimizer's diagnostics.
+
+    `conv` is laGP's: 0 converged, 1 hit maxit, 102 started on the lower boundary and was
+    reset instead of optimized. `its` counts lengthscale iterations; the nugget's
+    safeguarded Newton either converges or clamps, so its own count says little.
+    """
+
+    d: Float[Array, "m"]
+    g: Scalar
+    its: Int
+    conv: Int
 
 
 class MleD(NamedTuple):
-    """Result of a lengthscale MLE/MAP: `conv` is 0 ok, 1 maxit, 102 boundary reset."""
-
-    gp: GPsep
+    gp: GP
     d: Float[Array, "m"]
     its: Int
     conv: Int
 
 
 class MleG(NamedTuple):
-    """Result of a nugget MLE/MAP."""
-
-    gp: GPsep
+    gp: GP
     g: Scalar
     its: Int
 
 
-class Jmle(NamedTuple):
-    """Result of alternating lengthscale/nugget estimation."""
-
-    gp: GPsep
-    d: Float[Array, "m"]
-    g: Scalar
-    dits: Int
-    gits: Int
-    dconv: Int
-
-
-def mle_gpsep_d(
-    gp: GPsep,
+def mle_d(
+    gp: GP,
     dmin: Scalar,
     dmax: Scalar,
     ab: tuple[Scalar, Scalar] = (0.0, 0.0),
@@ -57,11 +57,11 @@ def mle_gpsep_d(
     d = jnp.where(reset, 0.9 * dmin + 0.1 * dmax, res.x)
     its = jnp.where(reset, 0, res.its)
     conv = jnp.where(reset, 102, res.conv)
-    return MleD(gp=newparams_gpsep(gp, d=d), d=d, its=its, conv=conv)
+    return MleD(gp=gp.at(d=d), d=d, its=its, conv=conv)
 
 
-def mle_gpsep_nug(
-    gp: GPsep,
+def mle_g(
+    gp: GP,
     gmin: Scalar,
     gmax: Scalar,
     ab: tuple[Scalar, Scalar] = (0.0, 0.0),
@@ -69,25 +69,25 @@ def mle_gpsep_nug(
 ) -> MleG:
     """MAP nugget by safeguarded Newton, matching mleGPsep(param="g")."""
     res = bracketed_newton(
-        lambda g: dllik_gpsep_g(gp, g, gab=ab),
-        lambda g: d2llik_gpsep_g(gp, g, gab=ab),
+        lambda g: dllik_g(gp, g, gab=ab),
+        lambda g: d2llik_g(gp, g, gab=ab),
         gp.g,
         gmin,
         gmax,
         maxiter=maxit,
     )
-    return MleG(gp=newparams_gpsep(gp, g=res.x), g=res.x, its=res.its)
+    return MleG(gp=gp.at(g=res.x), g=res.x, its=res.its)
 
 
-def jmle_gpsep(
-    gp: GPsep,
+def jmle(
+    gp: GP,
     drange: tuple[Scalar, Scalar],
     grange: tuple[Scalar, Scalar],
     dab: tuple[Scalar, Scalar] = (0.0, 0.0),
     gab: tuple[Scalar, Scalar] = (0.0, 0.0),
     N: int = 100,
     maxit: int = 100,
-) -> Jmle:
+) -> tuple[GP, Fit]:
     """Alternate lengthscale and nugget estimation, matching jmleGPsep."""
     m = gp.m
 
@@ -98,33 +98,29 @@ def jmle_gpsep(
 
     def body(state):
         gp, _, _, _, i = state
-        d = mle_gpsep_d(gp, drange[0], drange[1], ab=dab, maxit=maxit)
-        g = mle_gpsep_nug(d.gp, grange[0], grange[1], ab=gab, maxit=maxit)
+        d = mle_d(gp, drange[0], drange[1], ab=dab, maxit=maxit)
+        g = mle_g(d.gp, grange[0], grange[1], ab=gab, maxit=maxit)
         return (g.gp, d.its, g.its, d.conv, i + 1)
 
     init = (gp, jnp.asarray(m + 2), jnp.asarray(3), jnp.asarray(0), jnp.asarray(0))
-    gp, dits, gits, dconv, _ = jax.lax.while_loop(cond, body, init)
-    return Jmle(gp=gp, d=gp.d, g=gp.g, dits=dits, gits=gits, dconv=dconv)
+    gp, dits, _, dconv, _ = jax.lax.while_loop(cond, body, init)
+    return gp, Fit(d=gp.d, g=gp.g, its=dits, conv=dconv)
 
 
-def mle_switch(
-    gp: GPsep,
-    d_mle: bool,
-    g_mle: bool,
-    drange: tuple[Scalar, Scalar],
-    grange: tuple[Scalar, Scalar],
-    dab: tuple[Scalar, Scalar],
-    gab: tuple[Scalar, Scalar],
-    maxit: int = 100,
-) -> tuple[GPsep, dict]:
-    """Dispatch on which hyperparameters are estimated, matching mleGPsep.switch."""
-    if d_mle and g_mle:
-        r = jmle_gpsep(gp, drange, grange, dab, gab, maxit=maxit)
-        return r.gp, dict(d=r.d, g=r.g, dits=r.dits, gits=r.gits, dconv=r.dconv)
-    if d_mle:
-        r = mle_gpsep_d(gp, drange[0], drange[1], ab=dab, maxit=maxit)
-        return r.gp, dict(d=r.d, dits=r.its, dconv=r.conv)
-    if g_mle:
-        r = mle_gpsep_nug(gp, grange[0], grange[1], ab=gab, maxit=maxit)
-        return r.gp, dict(g=r.g, gits=r.its)
-    return gp, {}
+def fit(gp: GP, prior: Prior, maxit: int = 100) -> tuple[GP, Fit]:
+    """Estimate whichever hyperparameters the prior marks estimable, per mleGPsep.switch."""
+    drange = (jnp.asarray(prior.d.min), jnp.asarray(prior.d.max))
+    grange = (jnp.asarray(prior.g.min), jnp.asarray(prior.g.max))
+    dab = tuple(jnp.asarray(v) for v in prior.d.ab)
+    gab = tuple(jnp.asarray(v) for v in prior.g.ab)
+    zero = jnp.asarray(0)
+
+    if prior.d.estimate and prior.g.estimate:
+        return jmle(gp, drange, grange, dab, gab, maxit=maxit)
+    if prior.d.estimate:
+        r = mle_d(gp, *drange, ab=dab, maxit=maxit)
+        return r.gp, Fit(d=r.d, g=r.gp.g, its=r.its, conv=r.conv)
+    if prior.g.estimate:
+        r = mle_g(gp, *grange, ab=gab, maxit=maxit)
+        return r.gp, Fit(d=r.gp.d, g=r.g, its=r.its, conv=zero)
+    return gp, Fit(d=gp.d, g=gp.g, its=zero, conv=zero)

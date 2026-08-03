@@ -5,6 +5,7 @@ import pandas as pd
 
 from bench.common import BENCH_DIR, RlaGP, design
 import lagpax as lagp
+from lagpax.prior import Prior, darg, garg
 
 CASES = [
     dict(n=2000, nn=100, m=2),
@@ -28,11 +29,12 @@ def run() -> pd.DataFrame:
             for seed in SEEDS:
                 X, Z, XX = design(seed=seed, **case)
                 # both sides get the same prior; darg's own subsample is RNG-dependent
-                d = lagp.darg(None, X)
-                ours = lagp.agpsep(
-                    X, Z, XX, start=START, end=END, d=d._asdict(), method=method
+                d = darg(None, X)
+                prior = Prior(d=d, g=garg(1 / 10000, Z))
+                ours = lagp.agp(
+                    X, Z, XX, prior=prior, start=START, end=END, criterion=method
                 )
-                mean, var = R.agpsep(X, Z, XX, START, END, method, d=d)
+                mean, var = R.agp(X, Z, XX, START, END, method, d=d)
 
                 mean_err = relative_error(np.asarray(ours.mean), mean)
                 var_err = relative_error(np.asarray(ours.var), var)

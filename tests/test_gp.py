@@ -1,10 +1,12 @@
-"""GPsep likelihood, gradients and predictive equations against laGP."""
+"""GP likelihood, gradients and predictive equations against laGP."""
 
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
 import lagpax as lagp
+from lagpax.gp import dllik_d, dllik_g
+from lagpax.prior import Prior, Range
 
 D = np.array([0.3, 0.7, 1.1])
 G = 1e-3
@@ -12,14 +14,19 @@ G = 1e-3
 NEWGP = "gpi <- newGPsep(X, Z, d=d, g=g[1], dK=TRUE)"
 
 
+def _prior(dab=(0.0, 0.0), gab=(0.0, 0.0)) -> Prior:
+    """A Prior carrying only the Gamma (a, b) pairs, which is all the likelihood reads."""
+    return Prior(d=Range(ab=dab), g=Range(ab=gab))
+
+
 def _gp(small):
     X, Z = small
-    return lagp.new_gpsep(jnp.array(X), jnp.array(Z), jnp.array(D), G)
+    return lagp.GP(jnp.array(X), jnp.array(Z), jnp.array(D), G)
 
 
 def test_llik_matches_r(R, small):
     X, Z = small
-    got = float(lagp.llik_gpsep(_gp(small)))
+    got = float(_gp(small).llik())
     want = R.scalar(
         f"{NEWGP}; out <- llikGPsep(gpi); deleteGPsep(gpi); out",
         X=X,
@@ -33,7 +40,7 @@ def test_llik_matches_r(R, small):
 def test_llik_with_priors_matches_r(R, small):
     X, Z = small
     dab, gab = np.array([1.5, 3.9]), np.array([2.0, 5.0])
-    got = float(lagp.llik_gpsep(_gp(small), dab=tuple(dab), gab=tuple(gab)))
+    got = float(_gp(small).llik(_prior(tuple(dab), tuple(gab))))
     want = R.scalar(
         f"{NEWGP}; out <- llikGPsep(gpi, dab=dab, gab=gab); deleteGPsep(gpi); out",
         X=X,
@@ -48,15 +55,15 @@ def test_llik_with_priors_matches_r(R, small):
 
 def test_llik_ignores_priors_when_ab_is_zero(R, small):
     X, Z = small
-    plain = float(lagp.llik_gpsep(_gp(small)))
-    zeroed = float(lagp.llik_gpsep(_gp(small), dab=(0.0, 0.0), gab=(0.0, 0.0)))
+    plain = float(_gp(small).llik())
+    zeroed = float(_gp(small).llik(_prior()))
     assert plain == zeroed
 
 
 def test_dllik_d_matches_r(R, small):
     X, Z = small
     gp = _gp(small)
-    got = np.asarray(lagp.dllik_gpsep_d(gp, gp.d, (0.0, 0.0)))
+    got = np.asarray(dllik_d(gp, gp.d))
     want = np.asarray(
         R(
             f"{NEWGP}; out <- laGP:::dllikGPsep(gpi, param='d'); deleteGPsep(gpi); out",
@@ -72,7 +79,7 @@ def test_dllik_d_matches_r(R, small):
 def test_dllik_d_with_prior_matches_r(R, small):
     X, Z = small
     gp, ab = _gp(small), np.array([1.5, 3.9])
-    got = np.asarray(lagp.dllik_gpsep_d(gp, gp.d, tuple(ab)))
+    got = np.asarray(dllik_d(gp, gp.d, tuple(ab)))
     want = np.asarray(
         R(
             f"{NEWGP}; out <- laGP:::dllikGPsep(gpi, param='d', ab=ab); deleteGPsep(gpi); out",
@@ -89,7 +96,7 @@ def test_dllik_d_with_prior_matches_r(R, small):
 def test_dllik_g_matches_r(R, small):
     X, Z = small
     gp = _gp(small)
-    got = float(lagp.dllik_gpsep_g(gp, gp.g, (0.0, 0.0)))
+    got = float(dllik_g(gp, gp.g))
     want = R.scalar(
         f"{NEWGP}; out <- laGP:::dllikGPsep(gpi, param='g'); deleteGPsep(gpi); out",
         X=X,
@@ -103,7 +110,7 @@ def test_dllik_g_matches_r(R, small):
 def test_pred_lite_matches_r(R, small):
     X, Z = small
     XX = np.asarray(X[:6] + 0.05)
-    p = lagp.pred_gpsep(_gp(small), jnp.array(XX), lite=True)
+    p = _gp(small).predict(jnp.array(XX), lite=True)
     want = R(
         f"{NEWGP}; out <- predGPsep(gpi, XX, lite=TRUE); deleteGPsep(gpi); "
         "c(out$mean, out$s2, out$df, out$llik)",
@@ -126,7 +133,7 @@ def test_pred_lite_matches_r(R, small):
 def test_pred_full_matches_r(R, small):
     X, Z = small
     XX = np.asarray(X[:6] + 0.05)
-    p = lagp.pred_gpsep(_gp(small), jnp.array(XX), lite=False)
+    p = _gp(small).predict(jnp.array(XX), lite=False)
     mean = np.asarray(
         R(
             f"{NEWGP}; out <- predGPsep(gpi, XX, lite=FALSE); deleteGPsep(gpi); out$mean",
@@ -151,12 +158,12 @@ def test_pred_full_matches_r(R, small):
     np.testing.assert_allclose(np.asarray(p.s2), Sigma, rtol=1e-8, atol=1e-11)
 
 
-def test_pred_nonug_uses_sdeps(small):
+def test_pred_without_nugget_uses_sdeps(small):
     X, Z = small
     gp = _gp(small)
     XX = jnp.array(X[:3] + 0.05)
-    with_nug = lagp.pred_gpsep(gp, XX, lite=True).s2
-    without = lagp.pred_gpsep(gp, XX, lite=True, nonug=True).s2
+    with_nug = gp.predict(XX, lite=True).s2
+    without = gp.predict(XX, lite=True, nugget=False).s2
     assert np.all(np.asarray(without) < np.asarray(with_nug))
 
 
@@ -165,20 +172,20 @@ def test_mask_matches_a_smaller_design(small):
     X, Z = small
     k = 25
     mask = np.arange(len(X)) < k
-    padded = lagp.new_gpsep(
+    padded = lagp.GP(
         jnp.array(X), jnp.array(Z), jnp.array(D), G, jnp.array(mask)
     )
-    exact = lagp.new_gpsep(jnp.array(X[:k]), jnp.array(Z[:k]), jnp.array(D), G)
+    exact = lagp.GP(jnp.array(X[:k]), jnp.array(Z[:k]), jnp.array(D), G)
 
     assert float(padded.n) == k
     assert float(padded.phi) == pytest.approx(float(exact.phi), rel=1e-12)
     assert float(padded.ldetK) == pytest.approx(float(exact.ldetK), rel=1e-12)
-    assert float(lagp.llik_gpsep(padded)) == pytest.approx(
-        float(lagp.llik_gpsep(exact)), rel=1e-12
+    assert float(padded.llik()) == pytest.approx(
+        float(exact.llik()), rel=1e-12
     )
 
     XX = jnp.array(X[:5] + 0.05)
-    a, b = lagp.pred_gpsep(padded, XX), lagp.pred_gpsep(exact, XX)
+    a, b = padded.predict(XX), exact.predict(XX)
     np.testing.assert_allclose(
         np.asarray(a.mean), np.asarray(b.mean), rtol=1e-11, atol=1e-13
     )
@@ -189,19 +196,19 @@ def test_mask_matches_a_smaller_design(small):
 
 def test_update_matches_rebuild(small):
     X, Z = small
-    gp = lagp.new_gpsep(jnp.array(X[:30]), jnp.array(Z[:30]), jnp.array(D), G)
-    updated = lagp.update_gpsep(gp, jnp.array(X[30:]), jnp.array(Z[30:]))
+    gp = lagp.GP(jnp.array(X[:30]), jnp.array(Z[:30]), jnp.array(D), G)
+    updated = gp.update(jnp.array(X[30:]), jnp.array(Z[30:]))
     rebuilt = _gp(small)
-    assert float(lagp.llik_gpsep(updated)) == pytest.approx(
-        float(lagp.llik_gpsep(rebuilt)), rel=1e-12
+    assert float(updated.llik()) == pytest.approx(
+        float(rebuilt.llik()), rel=1e-12
     )
 
 
-def test_newparams_rebuilds_cached_quantities(small):
+def test_at_rebuilds_cached_quantities(small):
     X, Z = small
     gp = _gp(small)
-    moved = lagp.newparams_gpsep(gp, d=jnp.array([0.5, 0.5, 0.5]), g=1e-2)
-    direct = lagp.new_gpsep(
+    moved = gp.at(d=jnp.array([0.5, 0.5, 0.5]), g=1e-2)
+    direct = lagp.GP(
         jnp.array(X), jnp.array(Z), jnp.array([0.5, 0.5, 0.5]), 1e-2
     )
     assert float(moved.phi) == pytest.approx(float(direct.phi), rel=1e-14)

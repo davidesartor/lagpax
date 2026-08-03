@@ -36,25 +36,51 @@ X = np.random.uniform(size=(2000, 4))
 Z = np.sum(np.sin(4 * X), axis=1)
 XX = np.random.uniform(size=(500, 4))
 
-d = lagpax.darg(None, X)                      # design-derived lengthscale prior
-out = lagpax.agpsep(X, Z, XX, start=6, end=50, method="alc", d=d)
+out = lagpax.agp(X, Z, XX, start=6, end=50, criterion="alc")
 
 out.mean   # (500,) predictive mean
 out.var    # (500,) predictive variance
+out.Xi     # (500, 50) local design indices, 0-based
 ```
 
-`method="nn"` uses nearest neighbours; `method="alc"` grows the local design greedily by Active
-Learning Cohn, as in Gramacy & Apley (2015).
+`criterion="nn"` uses nearest neighbours; `criterion="alc"` grows the local design greedily by
+Active Learning Cohn, as in Gramacy & Apley (2015).
+
+Reuse the settings and the design-derived prior across calls by conditioning once:
+
+```python
+emu = lagpax.Local(start=6, end=50, criterion="alc").condition(X, Z)
+out = emu.predict(XX, batch=64)
+out = emu.refine(XX, passes=("nn", "alc"))   # warm-start each location from its own fit
+one = emu.local(XX[:1])                      # a single reference set, as laGPsep
+```
+
+`condition` resolves the prior — the one host-side step — so everything after it is pure JAX.
 
 ## Scope
 
-The separable (`GPsep`) family: `newGPsep`, `mleGPsep`, `jmleGPsep`, `alcGPsep`, `laGPsep`,
-`aGPsep`, plus `darg`/`garg`. Isotropic `GP` routines and the joint `aGP.seq`/`fish` extensions are
-not ported.
+The separable (`GPsep`) family of laGP 1.5.9: GP construction, likelihood and predictive equations,
+design-derived priors (`darg`/`garg`), lengthscale and nugget MLE/MAP (`mleGPsep`, `jmleGPsep`),
+ALC (`alcGPsep`), and the local schemes `laGPsep`, `aGPsep` and `aGP.seq`. Isotropic `GP` routines
+are a special case of the separable ones — pass a scalar `d`. laGP's constrained-optimization
+(`optim.auglag`) and calibration (`fcalib`) layers are out of scope.
+
+The public surface is fourteen names: `GP`, `Prior`, `Range`, `Prediction`, `Fit`, `Local`, `agp`,
+`lagp`, `fit`, `alc`, `ieci`, `nn`, `distance`, `covar`. Everything else stays importable from its
+own module (`lagpax.optim.lbfgsb`, `lagpax.search.ray`, `lagpax.mle.jmle`).
 
 Conventions follow laGP throughout — correlation `exp(-sum_k (x1_k - x2_k)^2 / d_k)`, nugget `g` on
-the diagonal, zero mean, scale profiled out as `phi = Z' Ki Z`, Student-t predictive with `df = n`.
-Two deliberate differences: `Xi` indices are 0-based (R is 1-based), and everything is float64.
+the diagonal, scale profiled out as `phi = Z' Ki Z`, Student-t predictive. Two deliberate
+differences: `Xi` indices are 0-based (R is 1-based), and everything is float64. One API difference:
+laGP's `laGPsep` returns a raw `s2` while `aGPsep` returns `s2 * df/(df - 2)`; here both return a
+`Prediction` carrying `s2`, `df` and a `var` property, so the conversion is explicit.
+
+The default `trend="zero"` is **simple kriging**, matching laGP: the process is zero-mean with no
+trend basis, so you should center `Z` yourself — an uncentered response inflates `phi`, which makes
+`s2` wrong and not just the mean. `trend="constant"` and `trend="linear"` profile out a mean
+alongside the scale (ordinary and universal kriging). They are not in laGP, and they are sold as
+calibration rather than accuracy: simple kriging omits the variance contribution from not knowing
+the trend coefficients, so its intervals are too narrow, especially at design boundaries.
 
 ## Parity
 
