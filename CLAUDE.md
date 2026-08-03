@@ -8,7 +8,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   his laGP source, not a clean-room reimplementation. LGPL-2.0-or-later covers it legally; the email
   is about doing it right, and he is a plausible JOSS co-author or reviewer. Do this *before* the
   first PyPI upload, not after.
-- Reserve the `lagpax` name on PyPI. Plain `lagp` was already squatted by an unrelated project.
+- **Reserve `lagpax` on PyPI with a placeholder upload.** Plain `lagp` was already squatted by an
+  unrelated LLM-proxy project, so the name is not safe just because it is free today.
+
+  ```bash
+  uv build && uv publish        # needs UV_PUBLISH_TOKEN, or --token
+  ```
+
+  Ship the placeholder as **version `0.0.1`**, not `0.1.0`. PyPI never lets a version number be
+  reused — deleting a release does not free its filename — so burning `0.1.0` on a stub would cost
+  the real first release its natural number.
+
+  The placeholder should be a **stub with no laGP-derived code in it** — a `__init__.py` with a
+  version string and a README pointing at the GitHub repo. That reserves the name without publicly
+  releasing the port, so it does not front-run the email to Bobby above. Publish the real package
+  only after that conversation.
 - CI running the parity suite is the credibility artifact for this package. Needs R + laGP in the
   runner (`r-lib/actions/setup-r`, then laGP from CRAN).
 - Do not weaken the license to MIT/Apache. See "License" below.
