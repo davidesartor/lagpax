@@ -7,8 +7,9 @@ rather than hardcoding a direction. Criteria needing configuration are factories
 """
 
 from typing import Callable, Optional
-from jaxtyping import Array, Float
+from jaxtyping import Array, Float, Scalar
 
+import jax
 import jax.numpy as jnp
 from jax.scipy.special import betainc, gammaln
 
@@ -133,6 +134,93 @@ def ieci(
     return criterion
 
 
+def _along_d(gp: GP):
+    """Reparameterize a GP by one scalar that moves every lengthscale together.
+
+    laGP's mspe/fisher machinery lives in the isotropic family, where the lengthscale is a
+    single number to differentiate against. The same derivative here is the directional one
+    along the all-ones direction, `sum_k d/d d_k`, which is laGP's exactly whenever the
+    `d_k` are equal and the natural reading of it when they are not.
+    """
+    return lambda t: gp.at(d=gp.d + t)
+
+
+def fisher_info(gp: GP) -> Scalar:
+    """Fisher information for the lengthscale, `-d2 llik / dd2`. Port of fishinfoGP.
+
+    laGP hand-writes this second derivative in dllikGP; autodiff gives it for free, which
+    is why the criteria built on it cost no derivative code of their own.
+    """
+    zero = jnp.zeros((), gp.X.dtype)
+    llik = lambda t: _along_d(gp)(t).llik()
+    return -jax.grad(jax.grad(llik))(zero)
+
+
+def _dpred(gp: GP, XX: Float[Array, "nn m"]) -> tuple[Float[Array, "nn"], ...]:
+    """Predictive mean and variance at XX with their lengthscale derivatives; dmus2GP.
+
+    laGP's `s2` here is the Student-t *variance* (it divides by `n - 2`), not the raw scale
+    `predGP_lite` returns -- the two differ by `df/(df-2)` and every formula below wants
+    this one.
+    """
+    zero = jnp.zeros((), gp.X.dtype)
+
+    def at(t):
+        pred = _along_d(gp)(t).predict(XX, lite=True)
+        return pred.mean, pred.var
+
+    (mu, s2), (dmu, ds2) = jax.jvp(at, (zero,), (jnp.ones_like(zero),))
+    return mu, dmu, s2, ds2
+
+
+def fisher(
+    gp: GP,
+    Xcand: Float[Array, "ncand m"],
+    Xref: Optional[Float[Array, "nref m"]] = None,
+) -> Float[Array, "ncand"]:
+    """Expected Fisher information from adding each candidate, port of efiGP/fishGP.
+
+    Scores how much a candidate sharpens the *hyperparameter* estimate rather than the
+    prediction, so it needs no reference set and ignores one if given.
+    """
+    _, dmu, s2, ds2 = _dpred(gp, Xcand)
+    return fisher_info(gp) + 0.5 * jnp.square(ds2 / s2) + jnp.square(dmu) / s2
+
+
+def mspe(fi: bool = True) -> Criterion:
+    """Mean-squared prediction error, port of mspeGP. Lower is better.
+
+    ALC's variance reduction plus, when `fi`, the extra error from having to re-estimate
+    the lengthscale once the candidate joins the design.
+    """
+
+    def criterion(gp, Xcand, Xref):
+        df = gp.df
+        reduction = alc(gp, Xcand, Xref)
+        s2avg = jnp.mean(gp.predict(Xref, lite=True).s2)
+
+        dnp = (df + 1.0) / (df - 1.0)
+        dnp2 = dnp * (df - 2.0) / df
+        out = dnp * s2avg - dnp2 * reduction
+
+        if not fi:
+            return out
+
+        _, dmu_ref, _, _ = _dpred(gp, Xref)
+        _, dmu, s2, ds2 = _dpred(gp, Xcand)
+
+        # laGP squares the whole ratio here but only `dmu` in the otherwise identical
+        # denominator of efiGP. Both are reproduced as written: the target is parity with
+        # laGP, not laGP's self-consistency.
+        F = fisher_info(gp)
+        info = F + 0.5 * jnp.square(ds2 / s2) + jnp.square(dmu / s2)
+        extra = jnp.mean(jnp.square(dmu_ref)) / info
+        return out + jnp.where(F > 0, extra, 0.0)
+
+    criterion.minimize = True
+    return criterion
+
+
 def _named(criterion) -> Criterion:
     """Resolve a criterion name to a function; pass callables through unchanged."""
     if callable(criterion):
@@ -142,6 +230,6 @@ def _named(criterion) -> Criterion:
             "ieci needs an incumbent: pass criterion=lagpax.ieci(fmin=...)"
         )
     try:
-        return {"alc": alc, "nn": nn}[criterion]
+        return {"alc": alc, "nn": nn, "mspe": mspe(), "fisher": fisher}[criterion]
     except KeyError:
         raise ValueError(f"unknown criterion {criterion!r}") from None

@@ -84,8 +84,16 @@ is `Z` and `df` is `n`.
   than laGP's".
 - `mle.py` — `mle_d` (with laGP's `0.9*dmin + 0.1*dmax` boundary reset, conv=102), `mle_g`, `jmle`,
   and `fit` dispatching on the prior's `estimate` flags.
-- `criteria.py` — `nn`, `alc` (port of `alcGPsep`) and the `ieci(fmin=, w=, nonug=)` factory. A
-  `Criterion` carries `minimize`, so the greedy loop never hardcodes argmax vs argmin.
+- `criteria.py` — `nn`, `alc` (port of `alcGPsep`), `fisher` (port of `efiGP`/`fishGP`), and the
+  `ieci(fmin=, w=, nonug=)` and `mspe(fi=)` factories. A `Criterion` carries `minimize`, so the
+  greedy loop never hardcodes argmax vs argmin — and configurable criteria have to be factories
+  rather than `functools.partial`, because a partial does not forward that attribute.
+  `fisher_info` and `_dpred` are laGP's `fishinfoGP` and `dmus2GP`, both of which laGP
+  hand-differentiates and neither of which needs derivative code here.
+- `blhs.py` — block Latin hypercube subsampling, port of `blhs`/`blhs.loop`. Host-side numpy like
+  `prior.py`: every draw has a different row count, so the `K` fits are different shapes and there
+  is nothing to batch. `bootstrap` returns a `Prior`, which is the whole reason Phase 0 made `Prior`
+  an explicit argument.
 - `search.py` — `exhaustive`, `ray`, `continuous`. All three take
   `(criterion, gp, Xcand, Xref, taken, step, rect)` and return one candidate index. `_block` picks
   "the offset-th *available* candidate" the way laGP's deletion from its candidate list does, by
@@ -133,7 +141,17 @@ answers separate by `sqrt(factr*eps)` ~ 5e-5 while the likelihood reached agrees
 - `laGPsep` returns raw `s2`; `aGPsep` returns `var = s2 * df/(df-2)`. `Prediction` carries both.
 - `Xi` is 1-based in R, 0-based here.
 - `darg`/`garg` subsample the design when `n > 1000` using R's RNG, so parity tests stay under 1000.
-- `dllikGPsep` is not exported from the laGP namespace; call it as `laGP:::dllikGPsep`.
+- `dllikGPsep` is not exported from the laGP namespace; call it as `laGP:::dllikGPsep`. Same for
+  `mspeGP`, `fishGP` and `dmus2GP`.
+- `mspeGP`, `fishGP` and `dmus2GP` are **isotropic-family** entry points (`newGP`, not `newGPsep`),
+  so their parity tests build a separable GP with every `d_k` equal — which is that GP exactly.
+- laGP is inconsistent with itself in one place the port has to copy: `efiGP` computes
+  `sq(dmu)/s2` where `mspeGP` computes `sq(dmu/s2)` in the otherwise identical Fisher denominator.
+  Both are reproduced as written. Do not "fix" either.
+- `dmus2GP`'s `s2` divides by `n - 2`, so it is the Student-t *variance*; `predGP_lite`'s is the raw
+  scale with `df = n`. `mspeGP` uses both, one line apart.
+- `blhs` bins on the *open* interval `((i-1)/m, i/m)`, so a coordinate of exactly 0 or 1 lands in
+  bin 1 regardless. Reproduced; it only bites on gridded designs.
 
 ## API
 
@@ -181,12 +199,16 @@ criterion, which is the "build your own" story the roadmap promises:
 ```python
 lagpax.alc(gp, Xcand, Xref)
 lagpax.nn(gp, Xcand, Xref)
+lagpax.fisher(gp, Xcand)                 # Xref is optional here: it scores no reference set
 lagpax.ieci(fmin=...)(gp, Xcand, Xref)   # criteria needing config are factories
+lagpax.mspe(fi=True)(gp, Xcand, Xref)
 ```
 
-A `Criterion` also carries `minimize`, because IECI is minimized where ALC is maximized. The greedy
-loop reads that flag; it does not hardcode a direction. Searches follow the same rule — one needing
-configuration is a `functools.partial` of the function in `lagpax.search`, not a new name.
+A `Criterion` also carries `minimize`, because IECI and MSPE are minimized where ALC is maximized.
+The greedy loop reads that flag; it does not hardcode a direction. Searches follow the same rule —
+one needing configuration is a `functools.partial` of the function in `lagpax.search`, not a new
+name. Criteria cannot use `partial`: it does not forward `minimize`, and `getattr(..., False)` would
+silently flip the direction. Hence factories.
 
 ### 4. The local scheme
 
@@ -195,7 +217,7 @@ Configuration separate from data; criterion separate from search.
 ```python
 scheme = lagpax.Local(
     start=6, end=50,
-    criterion="alc",        # "nn" | "alc" | lagpax.ieci(fmin=...) | any callable
+    criterion="alc",        # "nn" | "alc" | "mspe" | "fisher" | lagpax.ieci(fmin=...) | callable
     search="exhaustive",    # "exhaustive" | "ray" | "continuous"
     trend="zero",           # "zero" | "constant" | "linear"; "zero" reproduces laGP
     close=None, maxit=100,
@@ -241,8 +263,9 @@ executing it are in `ROADMAP.md` Phase 0.
 `dllik_d`, `dllik_g`, the `mle_*`/`jmle` entry points and the three searches. All stay importable from
 their own modules — the parity suite compares values, not names, and `tests/` reaches into
 `lagpax.optim` and `lagpax.search` directly — they just are not part of a 30-name `__all__` that has
-to be edited in two places for every addition. The public surface is fourteen names: `GP`, `Prior`,
-`Range`, `Prediction`, `Fit`, `Local`, `agp`, `lagp`, `fit`, `alc`, `ieci`, `nn`, `distance`, `covar`.
+to be edited in two places for every addition. The public surface is seventeen names: `GP`, `Prior`,
+`Range`, `Prediction`, `Fit`, `Local`, `agp`, `lagp`, `fit`, `alc`, `fisher`, `ieci`, `mspe`, `nn`,
+`bootstrap`, `distance`, `covar`.
 
 `jax.config.update("jax_enable_x64", True)` at import stays. A process-global side effect from
 importing a library is rude, but every tolerance in `tests/` assumes it and laGP is float64
@@ -293,14 +316,17 @@ build a tiny exact GP on. Which points you pick is the whole ballgame.
   nearest-neighbour because it will reach for points that brace the prediction rather than crowd it.
   laGP's default and the reason the method works. *Shipped.*
 - **MSPE** — ALC's variance reduction plus the extra error incurred from re-estimating the
-  lengthscale once the point is added. Slightly better designs at appreciably more cost. *Missing;
-  low priority — the accuracy gain over ALC is small.*
+  lengthscale once the point is added. Slightly better designs at appreciably more cost. *Shipped*
+  as the `mspe(fi=)` factory. With `fi=False` it is an affine decreasing function of ALC, so it
+  reranks nothing; the Fisher term is the entire difference.
 - **IECI (integrated expected conditional improvement)** — score a candidate by how much it improves
   the prospect of finding an optimum rather than how much it reduces variance. The criterion to use
   when the emulator serves optimization instead of prediction. *Shipped* as the `ieci(fmin=)`
   factory. It is minimized where ALC is maximized, which is why `Criterion` carries `minimize`.
 - **Fisher-information criterion** — pick the point that most sharpens the *hyperparameter* estimate
-  rather than the prediction. Useful when the local fit is unstable. *Missing; low priority.*
+  rather than the prediction. Useful when the local fit is unstable. *Shipped* as `fisher`. It needs
+  no reference set and ignores one if given, which is why the uniform signature has `Xref` optional
+  there.
 - **Ray search** — instead of scoring every candidate at every greedy step, search along rays
   emanating from the predictive location. Turns the dominant cost from linear in dataset size into
   something nearly independent of it. This is what makes laGP usable at millions of rows. *Shipped*
@@ -353,7 +379,9 @@ build a tiny exact GP on. Which points you pick is the whole ballgame.
 ### Global hyperparameter estimation on big data
 
 - **Block-bootstrap subsampling** — estimate one global lengthscale from many small subsamples of a
-  huge design, as a starting point or a fixed prior for the local fits. *Missing; low priority.*
+  huge design, as a starting point or a fixed prior for the local fits. *Shipped* as
+  `bootstrap(X, Z, m, K=)`, which returns a `Prior`; laGP's use of it as a *fixed* lengthscale is
+  `bootstrap(...).at(d=Range(estimate=False))`.
 - **Random line sampling** for visual diagnostics. *Not shipping.*
 
 ### Built on top of the GP, in laGP but out of scope here
@@ -385,12 +413,13 @@ Phase 1  ray + continuous search     done, 42bf35a
 Phase 2  IECI                        done, 42bf35a
 Phase 3  trend models                done, 42bf35a
 Phase 4  differentiable fitting      done, f86c421
-Phase 5  MSPE / Fisher / blhs        remaining, low value
+Phase 5  MSPE / Fisher / blhs        done, this section's last
 ```
 
-What is left: Phase 5, the CI job, and the performance levers in `ROADMAP.md`'s cross-cutting
-section. `ROADMAP.md` has the per-phase design, acceptance criteria and laGP reference algorithms,
-plus the departures from its own plan that were worth keeping.
+Every phase has landed, and the CI job exists (`.github/workflows/tests.yml`). What is left: the
+performance levers in `ROADMAP.md`'s cross-cutting section, and the pre-publish checklist below.
+`ROADMAP.md` has the per-phase design, acceptance criteria and laGP reference algorithms, plus the
+departures from its own plan that were worth keeping.
 
 The pre-publish checklist is unaffected by any of this — the PyPI placeholder should happen
 regardless of progress, and a `0.0.1` stub locks in no API.

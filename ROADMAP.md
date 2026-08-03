@@ -464,9 +464,10 @@ Caveats to handle explicitly:
 
 ---
 
-## Phase 5 — Low-value leftovers
+## Phase 5 — Low-value leftovers — **done**
 
-Do these last or not at all. Each is small; none changes what the package is for.
+Each is small; none changes what the package is for. All three landed anyway, since the derivative
+machinery they need is `jax.grad` here rather than the hand-written routines laGP had to carry.
 
 - **MSPE** (`criterion="mspe"`, port of `mspeGP`). ALC's variance reduction plus the extra error from
   re-estimating the lengthscale once the point is added. Signature
@@ -479,6 +480,28 @@ Do these last or not at all. Each is small; none changes what the package is for
   lengthscale from many small subsamples of a huge design. It slots in as a producer of a `Prior`,
   which is why Phase 0 made `Prior` a first-class argument — `condition(X, Z, prior=blhs_prior)`
   should just work with no further plumbing. Parity against `laGP::blhs`.
+
+### How it actually landed
+
+`criteria.mspe(fi=True)` and `criteria.fisher` in `criteria.py`, `blhs.py` for the subsampling;
+`tests/test_mspe.py` (13) and `tests/test_blhs.py` (10) carry the parity.
+
+Three things the plan above did not anticipate:
+
+- **The parity targets are isotropic.** `mspeGP`, `fishGP` and `dmus2GP` are `newGP` entry points,
+  not `newGPsep`. A separable GP with every `d_k` equal *is* that GP, so parity is exact; the port's
+  lengthscale derivative is the directional one along the all-ones direction, `sum_k d/d d_k`, which
+  is laGP's whenever the `d_k` agree and the natural reading when they do not.
+- **`mspe` and `ieci` are factories, not `functools.partial`.** A partial does not forward the
+  `minimize` attribute, and `search._pick` reads it with `getattr(..., False)` — so a partial would
+  silently maximize a criterion meant to be minimized. Configurable *searches* can still be partials;
+  configurable *criteria* cannot.
+- **laGP contradicts itself and the port copies it.** `efiGP` computes `sq(dmu)/s2` where `mspeGP`
+  computes `sq(dmu/s2)` in the otherwise identical Fisher denominator. Both reproduced as written:
+  the target is parity with laGP, not laGP's self-consistency.
+
+`blhs.loop`'s median is checked as an objective rather than an argmin, per §0 — the two optimizers
+stop on R's `factr` and separate by `sqrt(factr*eps) ~ 5e-5` in `d` while agreeing on the likelihood.
 
 **Explicitly not shipping**, do not implement even if it looks easy: cluster/thread parallelism (XLA
 decides), random line sampling (a visual diagnostic), constrained blackbox optimization
@@ -545,7 +568,8 @@ Phase 1  ray + continuous search          done, 42bf35a
 Phase 2  IECI                             done, 42bf35a
 Phase 3  trend models                     done, 42bf35a
 Phase 4  differentiable fitting           done
-Phase 5  MSPE / Fisher / blhs             remaining
+Phase 5  MSPE / Fisher / blhs             done
 ```
 
-What is left: Phase 5, the CI job, and the performance levers above.
+Every phase has landed and the CI job exists. What is left: the performance levers above and the
+pre-publish checklist.

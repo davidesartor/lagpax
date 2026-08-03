@@ -12,8 +12,9 @@ import jax
 
 jax.config.update("jax_enable_x64", True)
 
+from .blhs import bootstrap
 from .covar import covar, distance
-from .criteria import alc, ieci, nn
+from .criteria import alc, fisher, ieci, mspe, nn
 from .gp import GP, Prediction
 from .local import Local, agp, lagp
 from .mle import Fit, fit
@@ -28,10 +29,13 @@ __all__ = [
     "Range",
     "agp",
     "alc",
+    "bootstrap",
     "covar",
     "distance",
+    "fisher",
     "fit",
     "ieci",
     "lagp",
+    "mspe",
     "nn",
 ]

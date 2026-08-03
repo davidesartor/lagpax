@@ -2,7 +2,9 @@ lagpax
 Copyright (c) 2026 Davide Sartor
 
 This product is a derivative work. `src/lagpax/` is a translation into JAX of the
-separable (`GPsep`) family of the laGP R package:
+separable (`GPsep`) family of the laGP R package, together with the criteria and
+subsampling routines laGP ships only for its isotropic family (`mspeGP`, `fishGP`,
+`dmus2GP`) and its block Latin hypercube subsampling (`blhs`, `blhs.loop`):
 
     laGP: Local Approximate Gaussian Process Regression, version 1.5-9
     Copyright (c) Robert B. Gramacy <rbg@vt.edu> and Furong Sun <furongs@vt.edu>
@@ -26,5 +28,10 @@ The methods implemented here are described in:
 
     Seo, S., Wallat, M., Graepel, T. and Obermayer, K. (2000). "Gaussian Process
     Regression: Active Data Selection and Test Point Rejection." IJCNN.
+
+    Sun, F., Gramacy, R. B., Haaland, B., Lawrence, E. and Walker, A. (2019).
+    "Emulating Satellite Drag from Large Simulation Experiments." SIAM/ASA Journal
+    on Uncertainty Quantification, 7(2), 720-759. (Block Latin hypercube
+    subsampling; `blhs.py`.)
 
 lagpax is not affiliated with or endorsed by the laGP authors.
