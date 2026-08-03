@@ -77,7 +77,7 @@ parity test `xfail` to get a green run.
 
 ---
 
-## Phase 0 — API rename (blocking; do this first)
+## Phase 0 — API rename (blocking; do this first) — **done** (`539c740`)
 
 **Goal.** Replace the laGP-C-shaped surface with the design in `CLAUDE.md` § API. Zero behaviour
 change.
@@ -171,7 +171,11 @@ true.
 
 ---
 
-## Phase 1 — Ray and continuous search
+## Phase 1 — Ray and continuous search — **done** (`42bf35a`)
+
+Landed in `search.py` as `exhaustive`/`ray`/`continuous`, selected by `Local(search=)`. `Xstart` is
+deterministic (the first `numrays` of the `offset` nearest candidates) rather than R-RNG sampled, as
+the design notes below allow. Scaling evidence is `bench/scaling.py` -> `bench/scaling.csv`.
 
 **Goal.** `search="ray"` and `search="continuous"`, ports of laGP's `alcray`/`alcopt`.
 
@@ -265,7 +269,11 @@ Exact parity is **not** achievable here and you should not try: the 1-D search i
 
 ---
 
-## Phase 2 — IECI
+## Phase 2 — IECI — **done** (`42bf35a`)
+
+`criteria.ieci(fmin=, w=, nonug=)` is a factory returning the standard criterion signature, and
+`Criterion.minimize` carries the argmin/argmax choice so the greedy loop never hardcodes a direction.
+Parity in `tests/test_ieci.py`.
 
 **Goal.** `criterion="ieci"`, port of `ieciGPsep`. Turns the emulator into a BO surrogate.
 
@@ -314,7 +322,10 @@ against `laGP:::ieciGPsep` before wiring it into the greedy loop, and make the g
 
 ---
 
-## Phase 3 — Trend models
+## Phase 3 — Trend models — **done** (`42bf35a`)
+
+`GP` carries `F`, `b`, `Kfi`, `ldetF` and `df = n - p`; `trend="zero"` keeps `p == 0` and every
+snapshot array bit-identical. Tests in `tests/test_trend.py`, coverage claim included.
 
 **Goal.** `trend="constant"` and `trend="linear"` alongside the default `trend="zero"`. Not in laGP.
 
@@ -373,7 +384,32 @@ No laGP equivalent, so property tests:
 
 ---
 
-## Phase 4 — Differentiable fitting and a compilable pipeline
+## Phase 4 — Differentiable fitting and a compilable pipeline — **done**
+
+Landed as `optim.implicit_argmin`, applied in `mle.mle_d`, `mle.mle_g` and `mle.jmle`. Tests in
+`tests/test_diff.py`. Three deliberate departures from the design below, each for a reason worth
+keeping:
+
+- **A straight-through Newton step, not `jax.custom_vjp`.** `x - (step - stop_gradient(step))` from a
+  frozen `x` carries exactly the implicit-function derivative while returning the solver's value
+  bit-identically — which is what keeps the 124-array snapshot intact. `custom_vjp` would have needed
+  `nondiff_argnums` over a closure holding tracers (an `UnexpectedTracerError` waiting to happen) and
+  float0 plumbing for `GP`'s boolean `mask` leaf.
+- **`refine` keeps its Python loop.** `lax.scan` is impossible, not merely unnecessary: passes may
+  name *different* criteria, which trace to different functions. The loop unrolls at trace time and
+  the whole thing still jits and differentiates as one graph.
+- **The 1e-5 finite-difference acceptance is not reachable by differencing the solver,** and chasing
+  it is a trap. `lbfgsb` stops on R's `factr=1e7`, so it returns ~8 significant digits and a central
+  difference of its output carries `|x| * 1e-8 / 2h` ~ 7e-5 of noise; truncation error forbids raising
+  `h`. Tightening `factr` to 1e3 only moves the floor to 6.8e-5. The tests instead compare against an
+  argmin obtained by root-finding `grad llik = 0` with scipy, which removes the floor entirely and
+  agrees to ~1e-6. Reuse that pattern for any future gradient test through an optimizer.
+
+Also established: `jit` preserves the optimizer trajectory (1e-9), `vmap` does not. A batched
+`while_loop` shares its trip count, so one ulp of likelihood difference flips `lbfgsb`'s
+relative-change test and the answers separate by the solver's own resolution `sqrt(factr*eps)` ~ 5e-5
+while the likelihood reached still agrees to `factr*eps` = 2.2e-9. Assert the objective, not the
+argmin, when comparing batched against unbatched.
 
 **Goal.** Make the whole emulator an ordinary JAX function: `jit`-able end to end, and
 differentiable through the hyperparameter fit, not just with hyperparameters held fixed.
@@ -502,12 +538,12 @@ Independent of how far the phases have progressed, except where noted.
 ## Order, restated
 
 ```
-Phase 0  API rename                       blocking, do first
-Phase 1  ray + continuous search          biggest scalability gain
-Phase 2  IECI                             makes it a BO surrogate
-Phase 3  trend models                     independent, land whenever
-Phase 4  differentiable fitting           independent, land whenever
-Phase 5  MSPE / Fisher / blhs             last, or never
+Phase 0  API rename                       done, 539c740
+Phase 1  ray + continuous search          done, 42bf35a
+Phase 2  IECI                             done, 42bf35a
+Phase 3  trend models                     done, 42bf35a
+Phase 4  differentiable fitting           done
+Phase 5  MSPE / Fisher / blhs             remaining
 ```
 
-Phases 3 and 4 do not depend on 1 or 2 and can be reordered freely. Nothing may precede Phase 0.
+What is left: Phase 5, the CI job, and the performance levers above.

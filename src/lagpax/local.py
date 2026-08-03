@@ -236,8 +236,9 @@ class Local(NamedTuple):
 
     `criterion` and `search` are a grid, not a list of methods: any callable with the
     criterion signature works, and a search needing configuration is a `functools.partial`
-    of the one in `lagpax.search`. `close` is meaningful only for `search="exhaustive"` —
-    ray and continuous search look at the candidate set through their own starting points.
+    of the one in `lagpax.search`. `close` bounds the candidate set for every search, but
+    its default is ten times wider for ray and continuous, matching laGP — they only ever
+    touch the candidates their starting points reach, so a wider set costs them little.
     """
 
     start: int = 6
