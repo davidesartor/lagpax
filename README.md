@@ -59,7 +59,7 @@ Reuse the settings and the design-derived prior across calls by conditioning onc
 
 ```python
 emu = lagpax.Local(start=6, end=50, criterion="alc").condition(X, Z)
-out = emu.predict(XX, batch=64)
+out = emu.predict(XX, batch=256)
 out = emu.refine(XX, passes=("nn", "alc"))   # warm-start each location from its own fit
 one = emu.local(XX[:1])                      # a single reference set, as laGPsep
 ```
@@ -157,6 +157,11 @@ Those fits hold to within 0.09 s across a 1000x range in the location count, and
 of one, so below the break-even laGP wins outright — at 250 locations it is 2x ahead on ALC and 5x on
 nearest-neighbour. Above it the per-location rate decides, and the advantage is larger for the more
 expensive criterion, which is the case for shipping MSPE, IECI and Fisher rather than only ALC.
+
+That table is conservative: it was taken at `batch=64`, and a later sweep on a second A100 found the
+per-location rate falls **1.44x** going to `batch=256` for both criteria, which is now the default.
+The break-evens move down with it. We have not re-run the headline table on its original node, so
+rather than multiply two numbers from two machines together, the table stands as measured.
 
 Read the ratios with care. laGP's 16-core time for one fixed case ranged over 8.5x across the host
 CPUs we have benchmarked on, and on the worst of them the `nn` criterion was unaffected while ALC

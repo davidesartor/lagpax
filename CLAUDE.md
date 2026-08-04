@@ -240,7 +240,7 @@ scheme = lagpax.Local(
     close=None, maxit=100,
 )
 emu = scheme.condition(X, Z, prior=None, rng=None)
-out = emu.predict(XX, batch=64)
+out = emu.predict(XX, batch=256)
 out = emu.refine(XX, passes=("nn", "alc"))
 ```
 
@@ -510,10 +510,10 @@ section — read that before optimizing anything. Short version: at `n=4000`, `e
 it is 0.16s neighbours / 1.4s design / 2.9s fit, and inside one greedy step the cost is
 `covar(d, Xcand, Xdesign)` at ~290us against ~110us for the entire GP rebuild it feeds. So caching
 the cross-covariance across greedy steps is the lever; a rank-1 Cholesky rebuild is worth ~3% of the
-design stage, not the 30% the GPU-era reading of that list assumed. The batch-size sweep is done and
-flat, a blocked line search was tried and reverted, and power-of-two padding landed neutral at
-`end=50` — three measurements all saying the same thing, that shrinking the arithmetic in the greedy
-loop does not shrink its wall clock.
+design stage, not the 30% the GPU-era reading of that list assumed. A blocked line search was tried
+and reverted, and power-of-two padding landed neutral at `end=50` — both measurements saying the same
+thing, that shrinking the arithmetic in the greedy loop does not shrink its wall clock. The one
+scheduling knob that *did* move is `batch`; see below.
 
 ### The location sweep
 
@@ -534,11 +534,34 @@ points within 2%. Single seed. Below break-even laGP wins outright and the READM
 
 The ~3s fixed term is **not compile** — `bench.common.timeit` absorbs that in a warm-up call before
 timing. It is also not host-side: `Prior.from_design` is 70ms and `condition` is ~0ms. It is the GPU
-running launch-latency bound while the `lax.map` batch count is small. Note that linearity in `nn`
-says nothing about whether `batch` is well chosen: `lax.map(batch_size=b)` costs a constant per
-batch, so total cost is linear in `nn` for *any* `b`. The question is whether a larger `b` lowers the
-0.850ms/loc, and it needs its own sweep at large `nn` — the old flat batch sweep ran below `nn=10000`
-on CPU and does not answer it.
+running launch-latency bound while the `lax.map` batch count is small.
+
+Both rows above were measured at `batch=64`, which was the default at the time and is not the right
+one — see below. They are therefore a floor on the port, not its best.
+
+### The batch sweep
+
+Linearity in `nn` says nothing about whether `batch` is well chosen: `lax.map(batch_size=b)` costs a
+constant per batch, so total cost is linear in `nn` for *any* `b`. It has to be swept at large `nn`
+on a GPU, and the old sweep (CPU, `nn < 10000`) found flatness that does not hold there.
+`bench/timing-a100-loc-b{64,256,1024,4096}.csv`, on `ece-gpu002` (A100-**PCIE-40GB**, so not the same
+card as the location sweep), `n=8000`, `nn` of 16,000 and 64,000 — two points, so `fixed` and the
+rate are exactly determined and the noise is not separable from either:
+
+| `batch` | alc ms/loc | alc fixed | nn ms/loc | nn fixed |
+| --- | --- | --- | --- | --- |
+| 64 | 0.819 | 3.02s | 0.454 | 2.50s |
+| **256** | **0.568** | 3.01s | **0.316** | 2.00s |
+| 1024 | 0.529 | 3.93s | 0.303 | 2.30s |
+| 4096 | 0.521 | 5.77s | 0.446 | 0.88s |
+
+So the default moved 64 -> 256, in `Conditioned.predict`, `Conditioned.refine` and `agp`: 1.44x off
+the per-location rate for both criteria, at the lowest fixed term and the smallest peak memory of the
+three that are competitive. 1024 buys another 7% of rate and pays a second of fixed cost for it.
+4096 regresses `nn` outright and is the memory ceiling announcing itself — at `close=1050, end=50` a
+4096-wide batch is ~1.7GB of candidate correlations against ~107MB at 256.
+
+Value-neutral: `tests/snapshot.py` passes `batch=4` explicitly and still reports 124/124 identical.
 
 ## License
 

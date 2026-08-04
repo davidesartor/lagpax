@@ -561,9 +561,11 @@ So the levers below are ranked by that, not by flop counts:
   **not** value-neutral: the mask invariants hold exactly (`ldetK`, `phi` differ by 0), but ALC's
   reduction reassociates by ~1.4e-16 across padding widths, which flips near-tied argmaxes and
   cascades through the greedy loop. Same class as jit vs vmap; the parity suite is unaffected.
-- ~~Batch-size sweep for `lax.map(batch_size=)`~~ — done, and flat: on CPU everything from
-  `batch=2` to `batch=128` lands within 15% of each other, and only `batch=1` is bad (2.6x, dispatch
-  overhead). The default of 64 is fine; the knob matters for peak memory, not throughput.
+- ~~Batch-size sweep for `lax.map(batch_size=)`~~ — done **twice**, and the second one overturned the
+  first. On CPU below `nn=10000` everything from `batch=2` to `batch=128` lands within 15% and only
+  `batch=1` is bad (2.6x dispatch overhead), which is where "flat, the knob is for peak memory"
+  came from. On an A100 at `nn` of 16,000 and 64,000 it is not flat at all: the per-location rate
+  falls 1.44x going from 64 to 256. The default is now 256. See `CLAUDE.md` § The batch sweep.
 - A blocked line search in `lbfgsb` was tried and reverted: the 21 Armijo probes go out as one
   `vmap` and XLA spreads them across cores, so probing in blocks of four saves flops and no time.
 

@@ -201,7 +201,7 @@ class Conditioned(NamedTuple):
     def predict(
         self,
         XX: Float[Array, "nn m"],
-        batch: Optional[int] = 64,
+        batch: Optional[int] = 256,
         criterion=None,
         dstart: Optional[Float[Array, "nn m"]] = None,
     ) -> Prediction:
@@ -235,7 +235,7 @@ class Conditioned(NamedTuple):
         self,
         XX: Float[Array, "nn m"],
         passes: Sequence[Any] = ("nn", "alc"),
-        batch: Optional[int] = 64,
+        batch: Optional[int] = 256,
     ) -> Prediction:
         """Repeat `predict`, warm-starting each pass from the lengthscales the last one fit.
 
@@ -316,7 +316,7 @@ def agp(
     XX: Float[Array, "nn m"],
     prior: Optional[Prior] = None,
     rng: Optional[np.random.Generator] = None,
-    batch: Optional[int] = 64,
+    batch: Optional[int] = 256,
     passes: Optional[Sequence[Any]] = None,
     **settings: Any,
 ) -> Prediction:
