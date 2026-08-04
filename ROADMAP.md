@@ -520,6 +520,12 @@ fp64-throughput range across GTX 1080 / L40S / V100 produces only a 2.9x spread 
 workload is bound by kernel-launch latency and the sequential ALC greedy loop, not arithmetic. Buying
 a better GPU does not fix it.
 
+Measure with `bench.timing --suite locations`, never at one location count. Both engines are affine
+in the predictive-location count, laGP with no fixed term and lagpax with a few seconds of one, so a
+ratio is a statement about where on the curve you stood. Quote `fixed + per_location * nn`. The
+numbers and the break-evens live in `CLAUDE.md` § The location sweep; `CLAUDE.md` § The batch sweep
+has the `lax.map` scheduling result that came out of it.
+
 ### Done: the MLE stops inverting K
 
 `_build` materializes `Ki` because ALC needs the inverse; a likelihood needs only `ldetK` and `phi`,
@@ -573,9 +579,15 @@ So the levers below are ranked by that, not by flop counts:
 and handing the same prior to both sides — with independent priors the median relative error at
 n=2000 is ~1e-4 versus ~1e-8 shared, i.e. it measures the RNG gap rather than the port.
 `OPENBLAS_NUM_THREADS=1` is set at the top of `bench/common.py` before jax or R load; keep it there.
+
 The `vs16c` ratio is **not comparable across CSV files** — the GPU runs used SLURM nodes whose host
-CPUs differ by ~3x. Fix that before publishing any cross-chip comparison: pin the same host CPU, or
-report a laGP baseline per node.
+CPUs differ by ~3x. Every `bench/*.sbatch` now runs `lscpu` so the host CPU is on the record, and
+`bench/cpu.sbatch` pins `--constraint=amd7763` (dual-socket Zen3, 128 real cores, the largest
+single-model pool in `cpu`) so the CPU baseline is one fixed machine rather than whatever the
+scheduler had. Worse than a slow CPU is a node that never gives laGP its threads: on `ece-gpu002`
+16-core laGP ALC ran 8.5x slower than on `uri-gpu002` while `nn` was unaffected, which is thread
+count and not clock. **Keep the 1-core row** (`--r-threads 1 all`) — a 16-core-to-1-core ratio near
+1x instead of ~6x is the only way that failure announces itself, and it invalidates the whole file.
 
 ---
 
@@ -597,9 +609,10 @@ Independent of how far the phases have progressed, except where noted.
 - [x] **CI running the parity suite.** `.github/workflows/tests.yml`: `r-lib/actions/setup-r`, laGP
       from CRAN with a fallback to the pinned `laGP_1.5.9.tar.gz` archive tarball, then the suite
       under `LAGPAX_STRICT=1`. That env var makes `tests/conftest.py` return a nonzero exit on any
-      skip, which is what stops the job going green without ever loading R. `origin/main` is still at
-      `8df0bce`, so the workflow has never actually run — treat the first push as the real check of
-      the R install step, and expect the CRAN-vs-archive fallback to be where it breaks.
+      skip, which is what stops the job going green without ever loading R. It has now run for real:
+      green on `8d8e4b4` and `3a180d3`, so the R install step and the CRAN-vs-archive fallback both
+      work. There is no `gh` CLI on this cluster — check runs with
+      `curl -s https://api.github.com/repos/davidesartor/lagpax/actions/runs?per_page=3`.
 - [ ] **Do not weaken the license.** LGPL-2.0-or-later, inherited. Keep `NOTICE` accurate as modules
       are added.
 - [x] `README.md` accurate: scope list names the seventeen public names and the ported laGP
@@ -620,6 +633,23 @@ Phase 4  differentiable fitting           done
 Phase 5  MSPE / Fisher / blhs             done
 ```
 
-Every phase has landed and the CI job exists. The first cross-cutting performance item is done too —
-the MLE no longer inverts `K`. What is left: the remaining levers above, headed by caching the
-candidate cross-covariance across greedy steps, and the pre-publish checklist.
+Every phase has landed and the CI job runs green on `origin/main`. Two cross-cutting performance
+items are done: the MLE no longer inverts `K`, and `lax.map`'s batch default moved 64 -> 256.
+
+The capability list is closed. Auditing laGP 1.5.9's 51 namespace exports against the port leaves
+nothing in scope unported — `aGP.parallel` (cluster parallelism, XLA decides), `randLine` (a visual
+diagnostic), `optim.auglag`/`optim.efi` and `discrep.est`/`fcalib` are the four deliberate omissions,
+and `deleteGP*` plus the `*.R` duplicates have no analogue here. `dalcGP`/`dalcGPsep` are covered by
+`jax.grad` rather than by a hand-written derivative. Re-run that audit with:
+
+```r
+.libPaths("~/R/library"); print(sort(getNamespaceExports("laGP")))
+```
+
+Two known non-gaps, both correct and both cheap-looking: `GP.update` rebuilds where laGP applies a
+rank-1 update, and `alcray`'s `Xstart` is deterministic rather than R-RNG sampled, so no exact parity
+exists there — `tests/test_search.py` asserts a property instead.
+
+What is left is not features: the remaining levers above, headed by caching the candidate
+cross-covariance across greedy steps, multi-seed reruns of every GPU number reported so far, an
+actual submission of `bench/cpu.sbatch`, and the pre-publish checklist.

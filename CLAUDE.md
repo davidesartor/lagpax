@@ -298,9 +298,35 @@ What gets ported is laGP's **capability list, not its API**. The R surface is sh
 bookkeeping, two parallel type families and R's optimizer set, none of which is worth carrying into
 JAX. Below is what laGP can actually do, and where the port stands on each.
 
-Testing strategy is deliberately deferred — build first. Note only that parity with R stops being a
-whole-package property once anything divergent ships, and becomes a property of the laGP-equivalent
-configuration.
+Parity with R is not a whole-package property any more — trend models, the searches' `Xstart` and the
+differentiable path have no laGP equivalent — so it is a property of the *laGP-equivalent
+configuration*, which is what `tests/` pins.
+
+### The port is capability-complete
+
+Audited against laGP 1.5.9's 51 namespace exports
+(`.libPaths("~/R/library"); sort(getNamespaceExports("laGP"))`). Nothing in scope is unported:
+
+| laGP | here |
+| --- | --- |
+| `newGP(sep)`, `llikGP(sep)`, `predGP(sep)`, `updateGP(sep)` | `GP`, `.llik`, `.predict`, `.update` |
+| `darg`, `garg` | `Prior.from_design` |
+| `mleGP(sep)`, `jmleGP(sep)` | `mle_d`/`mle_g`/`jmle`, `fit` |
+| `alcGP(sep)`, `mspeGP`, `fishGP`, `ieciGP(sep)` | `alc`, `mspe`, `fisher`, `ieci` |
+| `alcrayGP(sep)`, `alcoptGP(sep)` | `search="ray"`, `search="continuous"` |
+| `laGP(sep)`, `aGP(sep)`, `aGP.seq` | `lagp`, `agp`, `Conditioned.refine` |
+| `blhs`, `blhs.loop` | `bootstrap` |
+| `distance` | `distance` |
+| `dalcGP(sep)` | `jax.grad` — no hand-written derivative |
+| `deleteGP*`, the `*.R` duplicates | nothing: C-handle bookkeeping, R-level reimplementations |
+
+Four deliberate omissions, listed in `ROADMAP.md` under "Explicitly not shipping": `aGP.parallel`,
+`randLine`, `optim.auglag`/`optim.efi`, `discrep.est`/`fcalib`.
+
+Two things that look like gaps and are not. `GP.update` rebuilds where laGP applies a rank-1 update —
+correct, and worth ~3% of the design stage, so it is a performance item. `alcray`'s `Xstart` is
+deterministic rather than R-RNG sampled, so no exact parity is available there and
+`tests/test_search.py` asserts a property instead.
 
 ### Working with a GP directly
 
@@ -433,9 +459,15 @@ Phase 4  differentiable fitting      done, f86c421
 Phase 5  MSPE / Fisher / blhs        done, this section's last
 ```
 
-Every phase has landed, and the CI job exists (`.github/workflows/tests.yml`). The MLE inner loop no
-longer inverts `K` (see `gp._profile`), which halved the flops of a fitted local GP. What is left:
-the remaining performance levers in `ROADMAP.md`'s cross-cutting section, and the pre-publish
+Every phase has landed, and `.github/workflows/tests.yml` runs green on `origin/main` — verified on
+`8d8e4b4` and `3a180d3`. There is no `gh` CLI on this cluster; check runs with
+`curl -s https://api.github.com/repos/davidesartor/lagpax/actions/runs?per_page=3`.
+
+Two performance items are done: the MLE inner loop no longer inverts `K` (see `gp._profile`), which
+halved the flops of a fitted local GP, and the `lax.map` batch default moved 64 -> 256. What is left
+is not features — the remaining levers in `ROADMAP.md`'s cross-cutting section, headed by caching the
+candidate cross-covariance; multi-seed reruns, since every GPU number reported so far is single-seed;
+an actual submission of `bench/cpu.sbatch`, which is committed but has never run; and the pre-publish
 checklist below.
 `ROADMAP.md` has the per-phase design, acceptance criteria and laGP reference algorithms, plus the
 departures from its own plan that were worth keeping.
