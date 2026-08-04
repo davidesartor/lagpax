@@ -7,6 +7,7 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 
 from bench.common import BENCH_DIR
@@ -35,6 +36,13 @@ def _accuracy_panel(ax, accuracy: pd.DataFrame):
     ax.set_ylabel("median relative error (worst case)")
 
 
+def affine_fit(nn, seconds) -> tuple[float, float]:
+    """Least-squares `fixed + per_location * nn`, the two numbers the sweep exists to get."""
+    design = np.c_[np.ones(len(nn)), nn]
+    fixed, per_location = np.linalg.lstsq(design, np.asarray(seconds), rcond=None)[0]
+    return fixed, per_location
+
+
 def _locations_figure(csvs: list[str], out: str):
     """Wall clock and speedup against the predictive-location count, at fixed n."""
     timing = pd.concat([pd.read_csv(BENCH_DIR / c) for c in csvs], ignore_index=True)
@@ -49,7 +57,9 @@ def _locations_figure(csvs: list[str], out: str):
 
         top = axes[0][col]
         for engine, part in grouped.groupby("engine"):
-            top.plot(part.nn, part.seconds, marker="o", label=engine)
+            fixed, per_location = affine_fit(part.nn.values, part.seconds.values)
+            label = f"{engine}: {fixed:.1f}s + {per_location * 1e3:.3f}ms/loc"
+            top.plot(part.nn, part.seconds, marker="o", label=label)
         top.set(xscale="log", yscale="log", xlabel="predictive locations")
         top.set_ylabel("seconds")
         top.set_title(f"aGPsep at n={int(sub.n.iloc[0])}, method={method}")

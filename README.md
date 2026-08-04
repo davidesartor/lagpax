@@ -142,17 +142,27 @@ parity is tested on a separately generated noisy design.
 
 ## Performance
 
-Stated plainly, because the honest answer differs by criterion. On an A100 at 1000 predictive
-locations, ALC design selection beats 16-core laGP by **4.3x** against the baseline measured on the
-same node, and still by **1.4x** against the fastest 16-core laGP time we have recorded on *any*
-node. Nearest-neighbour goes the other way and is 1.2-2.7x slower: there is no criterion to
-evaluate, the local fit sits in cache, and C wins. The advantage tracks how expensive the criterion
-is, which is the case for shipping MSPE, IECI and Fisher rather than only ALC.
+A single speedup number would be dishonest here, because the answer depends almost entirely on how
+many locations you predict. Both implementations are affine in that count, so the useful form is a
+fixed cost plus a per-location cost. On one A100 node (`n=8000`, 4-d, `end=50`, laGP on 16 cores of
+the same node's Xeon 8352Y), sweeping 250 to 256,000 locations:
 
-Read the ratios with care. laGP's own 16-core time for one fixed case ranges over 4.6x across the
-host CPUs we have benchmarked on (4.69s to 21.5s), so a speedup quoted against a different machine
-than it was measured on means nothing; `bench/timing-*.csv` are per-node for that reason. The GPU
-numbers are single-seed.
+| criterion | lagpax, A100 | laGP, 16 cores | break-even | large-`nn` speedup |
+| --- | --- | --- | --- | --- |
+| `alc` | 3.15 s + **0.850 ms**/loc | 6.218 ms/loc | ~590 locations | **7.3x** |
+| `nn` | 2.45 s + **0.473 ms**/loc | 1.608 ms/loc | ~2,200 locations | **3.4x** |
+
+Those fits hold to within 0.09 s across a 1000x range in the location count, and predict the
+256,000-location times from data taken below 16,000. laGP has no fixed term; we have a few seconds
+of one, so below the break-even laGP wins outright — at 250 locations it is 2x ahead on ALC and 5x on
+nearest-neighbour. Above it the per-location rate decides, and the advantage is larger for the more
+expensive criterion, which is the case for shipping MSPE, IECI and Fisher rather than only ALC.
+
+Read the ratios with care. laGP's 16-core time for one fixed case ranged over 8.5x across the host
+CPUs we have benchmarked on, and on the worst of them the `nn` criterion was unaffected while ALC
+was not — that node was not giving laGP its threads, and the run was discarded rather than published.
+A speedup quoted against a different machine than it was measured on means nothing. `bench/*.csv` are
+per-node, every `bench/*.sbatch` records the host CPU, and the numbers above are single-seed.
 
 Three GPUs spanning a 25x range in fp64 throughput produce only a 2.9x spread in wall clock, which
 says the workload is bound by kernel-launch latency and the sequential greedy loop, not by

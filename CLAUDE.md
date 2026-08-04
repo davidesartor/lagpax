@@ -51,7 +51,9 @@ uv run --no-sync pytest tests -q -k "alc and not mask" # by name
 uv sync --extra bench                                 # + matplotlib/pandas; NOT in the tests extra
 uv run --no-sync -m bench.accuracy                    # JAX vs laGP predictions -> bench/accuracy.csv
 uv run --no-sync -m bench.timing                      # wall clock -> bench/timing.csv
+uv run --no-sync -m bench.timing --suite locations    # wall clock vs predictive-location count
 uv run --no-sync -m bench.plot                        # -> bench/benchmark.png
+uv run --no-sync -m bench.plot --locations timing-a100-loc.csv timing-a100-loc-big.csv
 ```
 
 `--no-sync` on every `uv run` is load-bearing: a bare `uv run` re-syncs the default env and prunes
@@ -513,10 +515,30 @@ flat, a blocked line search was tried and reverted, and power-of-two padding lan
 `end=50` — three measurements all saying the same thing, that shrinking the arithmetic in the greedy
 loop does not shrink its wall clock.
 
-The A100 run (`bench/timing-a100.csv`) is the first where ALC beats 16-core laGP: 3.29s against
-14.22s on the same node at `n=2000`, 1000 locations, and still ahead of the 4.69s that is the fastest
-16-core laGP time recorded on any node. Nearest-neighbour stays 1.2-2.7x behind. Single seed; a
-three-seed rerun plus a V100 rerun at HEAD is what separates the card from the flop reduction.
+### The location sweep
+
+`bench.timing --suite locations` is the measurement that actually settles "is it faster", and
+`bench.plot --locations` draws it. Both implementations are **affine in the predictive-location
+count**, so quote `fixed + per_location * nn`, never a ratio at one `nn` — the ratio is a function of
+where you stood on the curve, which is how the earlier "4.3x" and "nn is 1.2-2.7x slower" claims
+came to be true and useless at the same time. `bench/timing-a100-loc{,-big}.csv`, on `uri-gpu002`
+(A100-SXM4-80GB, Xeon 8352Y, 16 cores), `n=8000`, 250 -> 256,000 locations:
+
+| criterion | jax A100 | laGP 16-core | break-even | asymptotic |
+| --- | --- | --- | --- | --- |
+| `alc` | 3.15s + 0.850ms/loc | 6.218ms/loc, no fixed term | nn ~ 590 | 7.3x |
+| `nn` | 2.45s + 0.473ms/loc | 1.608ms/loc, no fixed term | nn ~ 2160 | 3.4x |
+
+Max residual 0.09s over a 1000x range, and a fit built from `nn <= 16000` predicts the 256,000
+points within 2%. Single seed. Below break-even laGP wins outright and the README says so.
+
+The ~3s fixed term is **not compile** — `bench.common.timeit` absorbs that in a warm-up call before
+timing. It is also not host-side: `Prior.from_design` is 70ms and `condition` is ~0ms. It is the GPU
+running launch-latency bound while the `lax.map` batch count is small. Note that linearity in `nn`
+says nothing about whether `batch` is well chosen: `lax.map(batch_size=b)` costs a constant per
+batch, so total cost is linear in `nn` for *any* `b`. The question is whether a larger `b` lowers the
+0.850ms/loc, and it needs its own sweep at large `nn` — the old flat batch sweep ran below `nn=10000`
+on CPU and does not answer it.
 
 ## License
 
