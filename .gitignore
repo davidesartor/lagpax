@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+uv.lock
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+slurm-*.out
+# plots are regenerated from the CSVs by bench.plot
+bench/*.png

@@ -1,0 +1,37 @@
+lagpax
+Copyright (c) 2026 Davide Sartor
+
+This product is a derivative work. `src/lagpax/` is a translation into JAX of the
+separable (`GPsep`) family of the laGP R package, together with the criteria and
+subsampling routines laGP ships only for its isotropic family (`mspeGP`, `fishGP`,
+`dmus2GP`) and its block Latin hypercube subsampling (`blhs`, `blhs.loop`):
+
+    laGP: Local Approximate Gaussian Process Regression, version 1.5-9
+    Copyright (c) Robert B. Gramacy <rbg@vt.edu> and Furong Sun <furongs@vt.edu>
+    Licensed under the GNU Lesser General Public License
+    https://cran.r-project.org/package=laGP
+
+Because lagpax is derived from laGP's source, it is distributed under the same
+license. laGP's DESCRIPTION declares `License: LGPL` with no version; per CRAN's
+"Writing R Extensions", the bare form means version 2 or later. lagpax therefore
+uses LGPL-2.0-or-later and ships that text in LICENSE. The "or later" clause lets
+you adopt LGPL-2.1 or LGPL-3 instead if you prefer.
+
+The methods implemented here are described in:
+
+    Gramacy, R. B. and Apley, D. W. (2015). "Local Gaussian Process Approximation
+    for Large Computer Experiments." Journal of Computational and Graphical
+    Statistics, 24(2), 561-578.
+
+    Gramacy, R. B. (2016). "laGP: Large-Scale Spatial Modeling via Local
+    Approximate Gaussian Processes in R." Journal of Statistical Software, 72(1).
+
+    Seo, S., Wallat, M., Graepel, T. and Obermayer, K. (2000). "Gaussian Process
+    Regression: Active Data Selection and Test Point Rejection." IJCNN.
+
+    Sun, F., Gramacy, R. B., Haaland, B., Lawrence, E. and Walker, A. (2019).
+    "Emulating Satellite Drag from Large Simulation Experiments." SIAM/ASA Journal
+    on Uncertainty Quantification, 7(2), 720-759. (Block Latin hypercube
+    subsampling; `blhs.py`.)
+
+lagpax is not affiliated with or endorsed by the laGP authors.
