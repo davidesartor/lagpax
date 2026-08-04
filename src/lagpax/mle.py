@@ -59,10 +59,21 @@ def _solve_d(gp: GP, d0, g, dmin, dmax, ab, maxit: int):
 
 
 def _solve_g(gp: GP, d, g0, gmin, gmax, ab, maxit: int):
-    """The forward nugget solve at a given lengthscale, likewise without rebuilding."""
-    obj = lambda g: llik_dg(gp, d, g, gab=ab)
+    """The forward nugget solve at a given lengthscale, likewise without rebuilding.
+
+    Newton needs both derivatives at the same `g`, and one jvp of the gradient produces
+    them from a single factorization -- `grad` and `grad(grad(...))` as separate calls
+    Cholesky the same K twice per iteration. Sharing the pass reassociates the arithmetic,
+    so `g` moves in its last ulps; see CLAUDE.md on why that is judged on parity, not on
+    bit-identity.
+    """
+    dobj = jax.grad(lambda g: llik_dg(gp, d, g, gab=ab))
     res = bracketed_newton(
-        jax.grad(obj), jax.grad(jax.grad(obj)), g0, gmin, gmax, maxiter=maxit
+        lambda g: jax.jvp(dobj, (g,), (jnp.ones_like(g),)),
+        g0,
+        gmin,
+        gmax,
+        maxiter=maxit,
     )
     return res.x, res.its
 

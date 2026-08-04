@@ -29,9 +29,7 @@ def _gp(design, d0, g=G):
 
 def _llik_at(design, d, g, dab=(0.0, 0.0), gab=(0.0, 0.0)):
     X, Z = design
-    gp = lagp.GP(
-        jnp.array(X), jnp.array(Z), jnp.array(np.atleast_1d(d)), float(g)
-    )
+    gp = lagp.GP(jnp.array(X), jnp.array(Z), jnp.array(np.atleast_1d(d)), float(g))
     return float(gp.llik(Prior(d=Range(ab=dab), g=Range(ab=gab))))
 
 
@@ -182,7 +180,9 @@ def test_jmle_is_no_worse_than_r_on_a_noiseless_design(R, medium):
     assert ours >= theirs - 1e-5 * max(1.0, abs(theirs))
 
 
-@pytest.mark.parametrize("d_est,g_est", [(False, False), (True, False), (False, True), (True, True)])
+@pytest.mark.parametrize(
+    "d_est,g_est", [(False, False), (True, False), (False, True), (True, True)]
+)
 def test_fit_estimates_only_what_the_prior_marks(small, d_est, g_est):
     """Fit has the same four fields whichever hyperparameters move, so it stays a pytree."""
     X, Z = small
@@ -206,14 +206,12 @@ def test_lbfgsb_on_a_bounded_quadratic():
     lo = jnp.array([0.0, 0.0])
     hi = jnp.array([1.0, 1.0])
     target = jnp.array([2.0, -1.0])
-    res = lbfgsb(
-        lambda x: jnp.sum((x - target) ** 2), jnp.array([0.5, 0.5]), lo, hi
-    )
+    res = lbfgsb(lambda x: jnp.sum((x - target) ** 2), jnp.array([0.5, 0.5]), lo, hi)
     np.testing.assert_allclose(np.asarray(res.x), [1.0, 0.0], atol=1e-8)
 
 
 def test_bracketed_newton_on_a_scalar_root():
     root = bracketed_newton(
-        lambda x: jnp.cos(x), lambda x: -jnp.sin(x), jnp.array(1.0), 0.1, 3.0
+        lambda x: (jnp.cos(x), -jnp.sin(x)), jnp.array(1.0), 0.1, 3.0
     )
     assert float(root.x) == pytest.approx(np.pi / 2, abs=1e-9)

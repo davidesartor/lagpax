@@ -180,8 +180,7 @@ class NewtonResult(NamedTuple):
 
 
 def bracketed_newton(
-    dfun: Callable[[Scalar], Scalar],
-    d2fun: Callable[[Scalar], Scalar],
+    dfun: Callable[[Scalar], tuple[Scalar, Scalar]],
     x0: Scalar,
     lower: Scalar,
     upper: Scalar,
@@ -192,10 +191,14 @@ def bracketed_newton(
 
     Replaces laGP's Newton-with-Brent-fallback (mleGPsep_nug): same interior stationary
     point, and the same clamping to a boundary when the derivative never changes sign.
+
+    `dfun` returns the first and second derivative as a pair rather than as two callables:
+    for the nugget MLE both come out of one forward-over-reverse pass sharing a single
+    factorization of K, where two calls would Cholesky it twice per iteration.
     """
     lower = jnp.asarray(lower, jnp.float64)
     upper = jnp.asarray(upper, jnp.float64)
-    dlo, dhi = dfun(lower), dfun(upper)
+    dlo, dhi = dfun(lower)[0], dfun(upper)[0]
 
     def cond(state):
         x, lo, hi, it, done = state
@@ -203,7 +206,7 @@ def bracketed_newton(
 
     def body(state):
         x, lo, hi, it, _ = state
-        dx, d2x = dfun(x), d2fun(x)
+        dx, d2x = dfun(x)
         lo = jnp.where(dx > 0, x, lo)
         hi = jnp.where(dx > 0, hi, x)
 
