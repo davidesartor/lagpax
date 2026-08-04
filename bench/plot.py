@@ -1,5 +1,7 @@
 """Plot the timing and accuracy CSVs -> bench/benchmark.png"""
 
+import argparse
+
 import matplotlib
 
 matplotlib.use("Agg")
@@ -33,6 +35,42 @@ def _accuracy_panel(ax, accuracy: pd.DataFrame):
     ax.set_ylabel("median relative error (worst case)")
 
 
+def _locations_figure(csvs: list[str], out: str):
+    """Wall clock and speedup against the predictive-location count, at fixed n."""
+    timing = pd.concat([pd.read_csv(BENCH_DIR / c) for c in csvs], ignore_index=True)
+    methods = sorted(timing.method.unique())
+    fig, axes = plt.subplots(
+        2, len(methods), figsize=(6 * len(methods), 9), squeeze=False
+    )
+
+    for col, method in enumerate(methods):
+        sub = timing[timing.method == method]
+        grouped = sub.groupby(["engine", "nn"]).seconds.median().reset_index()
+
+        top = axes[0][col]
+        for engine, part in grouped.groupby("engine"):
+            top.plot(part.nn, part.seconds, marker="o", label=engine)
+        top.set(xscale="log", yscale="log", xlabel="predictive locations")
+        top.set_ylabel("seconds")
+        top.set_title(f"aGPsep at n={int(sub.n.iloc[0])}, method={method}")
+        top.legend()
+
+        # laGP is linear in nn and we are not, so the ratio is the story
+        wide = grouped.pivot(index="nn", columns="engine", values="seconds")
+        ours = next(c for c in wide.columns if c.startswith("jax"))
+        bottom = axes[1][col]
+        for engine in (c for c in wide.columns if c != ours):
+            bottom.plot(wide.index, wide[engine] / wide[ours], marker="o", label=engine)
+        bottom.axhline(1.0, color="grey", lw=0.8)
+        bottom.set(xscale="log", xlabel="predictive locations")
+        bottom.set_ylabel(f"speedup over {ours}")
+        bottom.legend()
+
+    fig.tight_layout()
+    fig.savefig(BENCH_DIR / out, dpi=150)
+    print(BENCH_DIR / out)
+
+
 def main():
     timing = pd.read_csv(BENCH_DIR / "timing.csv")
     accuracy = pd.read_csv(BENCH_DIR / "accuracy.csv")
@@ -49,4 +87,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    p = argparse.ArgumentParser()
+    # the location sweep is its own figure: one n, many nn, and a speedup curve
+    p.add_argument("--locations", nargs="+", default=None)
+    p.add_argument("--out", default="locations.png")
+    a = p.parse_args()
+    if a.locations:
+        _locations_figure(a.locations, a.out)
+    else:
+        main()
