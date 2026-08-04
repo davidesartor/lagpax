@@ -72,6 +72,23 @@ def _prior_of(dr, gr, cfg: _Cfg) -> Prior:
     )
 
 
+def _buckets(start: int, end: int) -> list[tuple[int, int, int]]:
+    """Greedy steps grouped by padded capacity: `(lo, hi, c)` runs steps lo..hi-1 on c rows.
+
+    Step `t` has t live rows and needs a static shape, so it pays for whatever it is padded
+    to. Padding every step to `end` costs `(end - start) * end^2`; padding to the next power
+    of two instead is ~2x less and still traces a logarithmic number of loop bodies rather
+    than one per step.
+    """
+    out, t = [], start
+    while t < end:
+        c = min(1 << max(t - 1, 0).bit_length(), end)
+        hi = min(c + 1, end)
+        out.append((t, hi, c))
+        t = hi
+    return out
+
+
 def _design(
     criterion: Criterion,
     search,
@@ -95,14 +112,27 @@ def _design(
     mask = jnp.arange(end) < start
     taken = jnp.arange(cfg.close) < start
 
-    def greedy(t: Scalar, state):
-        pos, mask, taken = state
-        gp = GP(Xloc[pos], Zloc[pos], d0, g0, mask, trend=cfg.trend)
-        w = search(criterion, gp, Xloc, Xref, taken, t - start, rect)
-        return pos.at[t].set(w), mask.at[t].set(True), taken.at[w].set(True)
+    # `pos`/`mask` stay full length -- only the GP is built at the bucket's capacity
+    def greedy(capacity: int):
+        def body(t: Scalar, state):
+            pos, mask, taken = state
+            gp = GP(
+                Xloc[pos[:capacity]],
+                Zloc[pos[:capacity]],
+                d0,
+                g0,
+                mask[:capacity],
+                trend=cfg.trend,
+            )
+            w = search(criterion, gp, Xloc, Xref, taken, t - start, rect)
+            return pos.at[t].set(w), mask.at[t].set(True), taken.at[w].set(True)
 
-    pos, _, _ = jax.lax.fori_loop(start, end, greedy, (pos, mask, taken))
-    return pos
+        return body
+
+    state = (pos, mask, taken)
+    for lo, hi, capacity in _buckets(start, end):
+        state = jax.lax.fori_loop(lo, hi, greedy(capacity), state)
+    return state[0]
 
 
 @partial(jax.jit, static_argnames=("cfg",))

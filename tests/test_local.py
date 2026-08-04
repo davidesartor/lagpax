@@ -140,6 +140,20 @@ def test_lagp_rejects_bad_sizes(small):
         lagp.lagp(X, Z, X[:1], start=6, end=10, close=10)
 
 
+@pytest.mark.parametrize("end", [7, 8, 32, 50, 200])
+def test_design_buckets_cover_every_step_with_room_for_it(end):
+    """Every greedy step lands in exactly one bucket whose capacity holds its live rows."""
+    start = 6
+    buckets = lagp.local._buckets(start, end)
+
+    covered = [t for lo, hi, _ in buckets for t in range(lo, hi)]
+    assert covered == list(range(start, end))
+    for lo, hi, capacity in buckets:
+        assert hi - 1 <= capacity <= end
+    # logarithmic in the design size, not one trace per step
+    assert len(buckets) <= max(1, (end - 1).bit_length())
+
+
 def test_lagp_nn_takes_the_nearest_points(medium):
     X, Z = medium
     Xref = X[:1] + 0.01
