@@ -47,7 +47,10 @@ out.Xi     # (500, 50) local design indices, 0-based
 `criterion` and `search` are a grid, not a list of methods. `criterion="nn"` takes nearest
 neighbours, `criterion="alc"` grows the design greedily by Active Learning Cohn (Gramacy & Apley,
 2015), and `criterion=lagpax.ieci(fmin=...)` scores candidates by expected improvement instead of
-variance, for when the emulator serves optimization. `search="exhaustive"` scores every candidate;
+variance, for when the emulator serves optimization. `criterion=lagpax.mspe(fi=True)` adds the error
+from re-estimating the lengthscale once the point is added, and `criterion="fisher"` picks the point
+that most sharpens the hyperparameter estimate rather than the prediction — useful when the local fit
+is unstable, and the one criterion that needs no reference set. `search="exhaustive"` scores every candidate;
 `search="ray"` and `search="continuous"` cost a fixed number of criterion evaluations per greedy
 step regardless of how many candidates there are, which is what makes the scheme usable on large
 datasets. Any callable with the criterion signature `(gp, Xcand, Xref) -> scores` drops in.
@@ -59,6 +62,16 @@ emu = lagpax.Local(start=6, end=50, criterion="alc").condition(X, Z)
 out = emu.predict(XX, batch=64)
 out = emu.refine(XX, passes=("nn", "alc"))   # warm-start each location from its own fit
 one = emu.local(XX[:1])                      # a single reference set, as laGPsep
+```
+
+On a design too large to fit globally, `bootstrap` estimates one lengthscale from many small block
+Latin hypercube subsamples (`blhs.loop`) and hands it back as a prior, either as a starting point or
+— as laGP uses it — held fixed:
+
+```python
+prior = lagpax.bootstrap(X, Z, m=2, K=32)                  # -> Prior, d.start from the subsamples
+prior = prior.at(d=lagpax.Range(estimate=False))           # laGP's use: one global, fixed d
+out = lagpax.agp(X, Z, XX, prior=prior)
 ```
 
 `condition` resolves the prior — the one host-side step — so everything after it is pure JAX:
@@ -129,11 +142,23 @@ parity is tested on a separately generated noisy design.
 
 ## Performance
 
-Work in progress, and stated plainly: on current benchmarks the GPU implementation beats
-single-core laGP by 2-14x but is **not yet consistently faster than 16-core laGP**. Profiling
-across three GPUs spanning a 25x range in fp64 throughput produces only a 2.9x spread in wall clock,
-which says the workload is bound by kernel-launch latency and the sequential ALC greedy loop, not by
-arithmetic. Optimization is ongoing; see `bench/`.
+Stated plainly, because the honest answer differs by criterion. On an A100 at 1000 predictive
+locations, ALC design selection beats 16-core laGP by **4.3x** against the baseline measured on the
+same node, and still by **1.4x** against the fastest 16-core laGP time we have recorded on *any*
+node. Nearest-neighbour goes the other way and is 1.2-2.7x slower: there is no criterion to
+evaluate, the local fit sits in cache, and C wins. The advantage tracks how expensive the criterion
+is, which is the case for shipping MSPE, IECI and Fisher rather than only ALC.
+
+Read the ratios with care. laGP's own 16-core time for one fixed case ranges over 4.6x across the
+host CPUs we have benchmarked on (4.69s to 21.5s), so a speedup quoted against a different machine
+than it was measured on means nothing; `bench/timing-*.csv` are per-node for that reason. The GPU
+numbers are single-seed.
+
+Three GPUs spanning a 25x range in fp64 throughput produce only a 2.9x spread in wall clock, which
+says the workload is bound by kernel-launch latency and the sequential greedy loop, not by
+arithmetic. That also shows up on CPU: padding the greedy design to a power of two rather than to
+`end` cuts its average matrix from 50 rows to 34 and changes nothing at `end=50`, while paying off
+1.2x at `end=200`.
 
 The arithmetic itself is roughly half what it was: the MLE inner loop evaluates the likelihood
 through a Cholesky alone rather than rebuilding the GP, whose explicit `K` inverse only ALC needs.

@@ -101,6 +101,9 @@ is `Z` and `df` is `n`.
   `O(ncand log ncand)` at every greedy step and would dominate the search.
 - `local.py` — `Local`, `Conditioned`, `lagp`/`agp`. `_core` is jitted with a `_Cfg` NamedTuple as the
   static config; `predict` maps it over predictive locations with `jax.lax.map(batch_size=)`.
+  `_buckets` groups the greedy steps by padded capacity — step `t` builds its GP at the next power of
+  two above `t`, not at `end` — so the loop traces a logarithmic number of bodies. Neutral at
+  `end=50` and 1.2x at `end=200`; it changes ALC in the last ulp, see below.
 
 The public API is flat: `__init__.py` re-exports every name and pins them in `__all__`, so a new
 public function has to be added in two places there. Importing the package has a global side effect —
@@ -116,6 +119,14 @@ masking `k`/`kx` in `_predict`/`alc`. Break any one and the padded GP silently s
 unpadded one — `tests/test_gp.py::test_mask_matches_a_smaller_design`,
 `tests/test_alc.py::test_alc_ignores_masked_rows` and the trend mask test in `tests/test_trend.py`
 are the guards.
+
+The invariants are exact but the *padding width* is not neutral. `ldetK` and `phi` agree to the bit
+across widths — the masked contributions are exactly `log(1)` and `0.0` — while `alc` differs by
+~1.4e-16, because XLA tiles a reduction over 8 rows differently from one over 50. That is enough to
+flip a near-tied argmax, and the greedy loop cascades it: at `n=4000` the two padding schemes agree
+on only 25 of 100 local designs. Neither is more correct than the other, and laGP (which grows real
+`k x k` matrices) is a third such point. Judge a change here on the parity suite and on rmse, never
+on whether `Xi` is unchanged.
 
 ### Gradients through the fit
 
@@ -490,7 +501,14 @@ it is 0.16s neighbours / 1.4s design / 2.9s fit, and inside one greedy step the 
 `covar(d, Xcand, Xdesign)` at ~290us against ~110us for the entire GP rebuild it feeds. So caching
 the cross-covariance across greedy steps is the lever; a rank-1 Cholesky rebuild is worth ~3% of the
 design stage, not the 30% the GPU-era reading of that list assumed. The batch-size sweep is done and
-flat, and a blocked line search was tried and reverted.
+flat, a blocked line search was tried and reverted, and power-of-two padding landed neutral at
+`end=50` — three measurements all saying the same thing, that shrinking the arithmetic in the greedy
+loop does not shrink its wall clock.
+
+The A100 run (`bench/timing-a100.csv`) is the first where ALC beats 16-core laGP: 3.29s against
+14.22s on the same node at `n=2000`, 1000 locations, and still ahead of the 4.69s that is the fastest
+16-core laGP time recorded on any node. Nearest-neighbour stays 1.2-2.7x behind. Single seed; a
+three-seed rerun plus a V100 rerun at HEAD is what separates the card from the flop reduction.
 
 ## License
 

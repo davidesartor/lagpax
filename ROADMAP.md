@@ -554,6 +554,13 @@ So the levers below are ranked by that, not by flop counts:
   on the measurement above, not the 30% the GPU-era reading of this list assumed. `GP.update` also
   rebuilds rather than applying laGP's rank-1 update — correct, and the same small item.
 - `lax.scan` over the greedy steps.
+- ~~Pad the greedy design to a power of two rather than to `end`~~ — done, and it confirms the
+  latency diagnosis rather than beating it. Average capacity drops 50 -> 34 at the default and wall
+  clock does not move (10.72s vs 10.71s, n=4000, ALC, interleaved best-of-3); at `end=200` it is
+  1.16-1.20x and compiles in 20.0s against 26.4s. Kept for the large-`end` regime. Note that it is
+  **not** value-neutral: the mask invariants hold exactly (`ldetK`, `phi` differ by 0), but ALC's
+  reduction reassociates by ~1.4e-16 across padding widths, which flips near-tied argmaxes and
+  cascades through the greedy loop. Same class as jit vs vmap; the parity suite is unaffected.
 - ~~Batch-size sweep for `lax.map(batch_size=)`~~ — done, and flat: on CPU everything from
   `batch=2` to `batch=128` lands within 15% of each other, and only `batch=1` is bad (2.6x, dispatch
   overhead). The default of 64 is fine; the knob matters for peak memory, not throughput.
