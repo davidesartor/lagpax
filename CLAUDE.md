@@ -487,9 +487,17 @@ the RNG gap, not the port: at n=2000 the median relative error is ~1e-4 with ind
 ### Reading the timing CSVs
 
 The `vs16c` ratio is **not comparable across CSV files** — the GPU runs were done on different SLURM
-nodes whose host CPUs differ by ~3x (V100 node's 16-core laGP baseline is 13.70s where the L40S
-node's is 4.70s for identical work). Only GPU-to-GPU wall clock is clean. Fix this before publishing
-any cross-chip comparison: pin the same host CPU, or report laGP baselines per node.
+nodes whose host CPUs differ by ~3x. Only GPU-to-GPU wall clock is clean. Pin the same host CPU, or
+report laGP baselines per node, before publishing any cross-chip comparison.
+
+Worse than a slow CPU: a node where laGP's OpenMP silently does not get the cores. On `ece-gpu002`,
+with `-c 16` granted, laGP's 16-core ALC ran at 53.2 ms/location against 6.27 on `uri-gpu002` — 8.5x,
+far more than any CPU generation gap. The tell is that `nn` was *unaffected* on the same two runs
+(1.47 vs 1.61 ms/location), so it was thread count and not clock speed. **A 16-core laGP number is
+only trustworthy next to a 1-core number from the same node**: on a healthy node the ratio is ~6x, and
+anything near 1x means `omp.threads` did not take and the whole file is scrap. `--r-threads all`
+alone cannot be validated, so drop the 1-core row only when a sibling run has already established the
+node is healthy.
 
 Current state: a 25x fp64-throughput range across GTX 1080 / L40S / V100 produces only a 2.9x spread
 in wall clock, so the workload is bound by kernel-launch latency and the sequential ALC greedy loop,

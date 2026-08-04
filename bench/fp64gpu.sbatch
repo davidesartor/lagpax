@@ -17,6 +17,8 @@ ARCH=$(uname -m)
 GPU=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1 | tr ' ' '_')
 TAG="${GPU}"
 echo "arch=$ARCH gpu=$GPU"
+# the laGP column is a host-CPU number even on a GPU node, so put the CPU on the record
+lscpu | grep -E "Model name|^CPU\(s\)|Thread\(s\) per core"
 
 # the repo .venv is resolved for x86_64; a gh200 lands on aarch64 and needs its own
 if [ "$ARCH" != "x86_64" ]; then
