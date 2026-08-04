@@ -14,6 +14,16 @@ CASES = (
     # laGP on one core owns the budget here, so this regime runs a single seed
     + [dict(n=100_000, nn=10_000, m=4, seeds=1)]
 )
+
+# laGP is linear in the number of predictive locations while we are nearly flat until the
+# GPU saturates, so the location count -- not n -- is what the ratio actually turns on.
+# The last point is jax-only territory: laGP needs about an hour of 16 cores to reach it.
+LOCATIONS = [
+    dict(n=8000, nn=nn, m=4, seeds=1)
+    for nn in (250, 1000, 4000, 16_000, 64_000, 256_000)
+]
+
+SUITES = {"default": CASES, "locations": LOCATIONS}
 START, END = 6, 50
 
 
@@ -34,7 +44,8 @@ def bench_jax(case, seed, method, batch):
         out = lagp.agp(X, Z, XX, start=START, end=END, criterion=method, batch=batch)
         return jax.block_until_ready(out)
 
-    return timeit(run)[0]
+    # a repeat costs a full pass, and the spread shrinks as the pass gets longer
+    return timeit(run, repeat=1 if case["nn"] >= 16_000 else 3)[0]
 
 
 def bench_lagp(R, case, seed, method):
@@ -43,7 +54,13 @@ def bench_lagp(R, case, seed, method):
 
 
 def run(
-    methods, batch, skip_r, out="timing.csv", cases=CASES, seeds=None
+    methods,
+    batch,
+    skip_r,
+    out="timing.csv",
+    cases=CASES,
+    seeds=None,
+    r_threads=("1", "all"),
 ) -> pd.DataFrame:
     backend = jax_backend()
     # cpu_count reports the machine; the cgroup/scheduler affinity is what we actually get
@@ -52,9 +69,10 @@ def run(
         f"jax-{backend}-{cores}core" if backend == "cpu" else f"jax-{backend}": None
     }
     if not skip_r:
-        engines["lagp-1core"] = RlaGP(threads=1)
-        if cores > 1:
-            engines[f"lagp-{cores}core"] = RlaGP(threads=cores)
+        # single-core laGP owns the budget at large nn, so it can be dropped on its own
+        for spec in dict.fromkeys(cores if t == "all" else int(t) for t in r_threads):
+            if spec == 1 or cores > 1:
+                engines[f"lagp-{spec}core"] = RlaGP(threads=spec)
 
     rows = []
     for spec in cases:
@@ -90,11 +108,16 @@ if __name__ == "__main__":
     p.add_argument("--batch", type=int, default=64)
     p.add_argument("--skip-r", action="store_true")
     p.add_argument("--out", default="timing.csv")
-    # a walltime-bounded run wants a subset: indices into CASES, and a seed override
+    p.add_argument("--suite", choices=sorted(SUITES), default="default")
+    # a walltime-bounded run wants a subset: indices into the suite, and a seed override
     p.add_argument("--cases", nargs="+", type=int, default=None)
     p.add_argument("--seeds", type=int, default=None)
+    p.add_argument("--r-threads", nargs="+", default=["1", "all"])
     a = p.parse_args()
-    cases = CASES if a.cases is None else [CASES[i] for i in a.cases]
+    suite = SUITES[a.suite]
+    cases = suite if a.cases is None else [suite[i] for i in a.cases]
     print(
-        run(a.methods, a.batch, a.skip_r, a.out, cases, a.seeds).to_string(index=False)
+        run(a.methods, a.batch, a.skip_r, a.out, cases, a.seeds, a.r_threads).to_string(
+            index=False
+        )
     )
