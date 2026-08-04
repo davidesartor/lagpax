@@ -4,6 +4,10 @@ Every criterion has the same signature, `(gp, Xcand, Xref) -> Float[Array, "ncan
 anything with that shape can be handed to `Local(criterion=...)`. A criterion that is
 better when smaller carries `minimize = True`; the greedy search reads that attribute
 rather than hardcoding a direction. Criteria needing configuration are factories.
+
+A criterion that also accepts a precomputed `covar(gp.d, Xcand, gp.X)` carries
+`cached = True`, which lets the greedy loop hand it one column per step instead of paying
+for the whole cross-covariance again. Unmarked criteria are called the plain way.
 """
 
 from typing import Callable, Optional
@@ -25,14 +29,20 @@ def _cond_var(
     gp: GP,
     Xcand: Float[Array, "ncand m"],
     Xref: Float[Array, "nref m"],
+    kx: Optional[Float[Array, "ncand n"]] = None,
 ) -> tuple[Float[Array, "ncand nref"], Float[Array, "ncand"]]:
     """Rank-1 variance reduction at each Xref from adding each candidate, and each mui.
 
     `ktKikx` is laGP's quantity in alcGPsep/ieciGPsep: the amount by which the predictive
     variance at a reference location drops once the candidate joins the design.
+
+    `kx` is `covar(gp.d, Xcand, gp.X)` and may be supplied precomputed: the greedy loop
+    adds one design point per step, so it can carry the columns forward instead of
+    rebuilding the whole cross-covariance every step.
     """
     k = jnp.where(gp.mask, covar(gp.d, Xref, gp.X), 0.0)  # (nref, n)
-    kx = jnp.where(gp.mask, covar(gp.d, Xcand, gp.X), 0.0)  # (ncand, n)
+    kx = covar(gp.d, Xcand, gp.X) if kx is None else kx  # (ncand, n)
+    kx = jnp.where(gp.mask, kx, 0.0)
     kxy = covar(gp.d, Xcand, Xref)  # (ncand, nref)
 
     gvec = kx @ gp.Ki
@@ -50,12 +60,16 @@ def alc(
     gp: GP,
     Xcand: Float[Array, "ncand m"],
     Xref: Float[Array, "nref m"],
+    kx: Optional[Float[Array, "ncand n"]] = None,
 ) -> Float[Array, "ncand"]:
     """Expected reduction in predictive variance at Xref from adding each candidate."""
-    ktKikx, mui = _cond_var(gp, Xcand, Xref)
+    ktKikx, mui = _cond_var(gp, Xcand, Xref, kx)
     df = gp.df
     out = jnp.mean(gp.phi * ktKikx / df * (df / (df - 2.0)), axis=-1)
     return jnp.where(mui <= SDEPS, -jnp.inf, out)
+
+
+alc.cached = True
 
 
 def nn(
@@ -114,8 +128,8 @@ def ieci(
     the incumbent best value and changes every step of a BO loop, so it stays an argument.
     """
 
-    def criterion(gp, Xcand, Xref):
-        ktKikx, mui = _cond_var(gp, Xcand, Xref)
+    def criterion(gp, Xcand, Xref, kx=None):
+        ktKikx, mui = _cond_var(gp, Xcand, Xref, kx)
         ref = gp.predict(Xref, lite=True, nugget=nugget)
         df = gp.df
 
@@ -131,6 +145,7 @@ def ieci(
         return jnp.where(mui <= SDEPS, jnp.inf, out)
 
     criterion.minimize = True
+    criterion.cached = True
     return criterion
 
 
@@ -194,9 +209,9 @@ def mspe(fi: bool = True) -> Criterion:
     the lengthscale once the candidate joins the design.
     """
 
-    def criterion(gp, Xcand, Xref):
+    def criterion(gp, Xcand, Xref, kx=None):
         df = gp.df
-        reduction = alc(gp, Xcand, Xref)
+        reduction = alc(gp, Xcand, Xref, kx)
         s2avg = jnp.mean(gp.predict(Xref, lite=True).s2)
 
         dnp = (df + 1.0) / (df - 1.0)
@@ -218,6 +233,7 @@ def mspe(fi: bool = True) -> Criterion:
         return out + jnp.where(F > 0, extra, 0.0)
 
     criterion.minimize = True
+    criterion.cached = True
     return criterion
 
 

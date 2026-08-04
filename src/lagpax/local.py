@@ -14,7 +14,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .covar import distance
+from .covar import covar, distance
 from .criteria import Criterion, _named as _named_criterion, nn
 from .gp import GP, Prediction, Trend
 from .mle import Fit, fit
@@ -112,10 +112,21 @@ def _design(
     mask = jnp.arange(end) < start
     taken = jnp.arange(cfg.close) < start
 
+    # column j of `kxc` is covar(d0, Xloc, Xloc[pos[j]]), so a step appends one column
+    # instead of rebuilding the whole candidate/design cross-covariance
+    cached = getattr(criterion, "cached", False) and getattr(search, "cached", False)
+    kxc = (
+        jnp.zeros((cfg.close, end), Xloc.dtype)
+        .at[:, :start]
+        .set(covar(d0, Xloc, Xloc[:start]))
+        if cached
+        else None
+    )
+
     # `pos`/`mask` stay full length -- only the GP is built at the bucket's capacity
     def greedy(capacity: int):
         def body(t: Scalar, state):
-            pos, mask, taken = state
+            pos, mask, taken, kxc = state
             gp = GP(
                 Xloc[pos[:capacity]],
                 Zloc[pos[:capacity]],
@@ -124,12 +135,15 @@ def _design(
                 mask[:capacity],
                 trend=cfg.trend,
             )
-            w = search(criterion, gp, Xloc, Xref, taken, t - start, rect)
-            return pos.at[t].set(w), mask.at[t].set(True), taken.at[w].set(True)
+            kw = {} if kxc is None else {"kx": kxc[:, :capacity]}
+            w = search(criterion, gp, Xloc, Xref, taken, t - start, rect, **kw)
+            if kxc is not None:
+                kxc = kxc.at[:, t].set(covar(d0, Xloc, Xloc[w][None])[:, 0])
+            return pos.at[t].set(w), mask.at[t].set(True), taken.at[w].set(True), kxc
 
         return body
 
-    state = (pos, mask, taken)
+    state = (pos, mask, taken, kxc)
     for lo, hi, capacity in _buckets(start, end):
         state = jax.lax.fori_loop(lo, hi, greedy(capacity), state)
     return state[0]

@@ -10,7 +10,9 @@ attribute for its direction, so any criterion works with any search.
 usable when the candidate set is huge.
 
 Signature is `(criterion, gp, Xcand, Xref, taken, t, rect) -> index into Xcand`, where `t`
-counts greedy steps from 0 and `taken` marks the candidates already in the design.
+counts greedy steps from 0 and `taken` marks the candidates already in the design. A search
+that also takes a cached `kx` carries `cached = True`; the greedy loop only maintains the
+cache for those.
 """
 
 from typing import Callable
@@ -76,11 +78,21 @@ def exhaustive(
     taken: Bool[Array, "ncand"],
     t: Scalar,
     rect: Float[Array, "2 m"],
+    kx: Float[Array, "ncand n"] | None = None,
 ) -> Int[Array, ""]:
-    """Score every candidate and take the best, matching laGP's default search."""
+    """Score every candidate and take the best, matching laGP's default search.
+
+    `Xcand` is the same array at every greedy step, so `covar(gp.d, Xcand, gp.X)` gains one
+    column per step and is otherwise unchanged; `kx` is that matrix carried forward. The
+    ray and continuous searches score points that are not candidates, so no cache applies.
+    """
+    kw = {} if kx is None or not getattr(criterion, "cached", False) else {"kx": kx}
     return _pick(
-        criterion(gp, Xcand, Xref), taken, getattr(criterion, "minimize", False)
+        criterion(gp, Xcand, Xref, **kw), taken, getattr(criterion, "minimize", False)
     )
+
+
+exhaustive.cached = True
 
 
 def _golden_max(
