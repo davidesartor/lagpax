@@ -31,9 +31,7 @@ def bench_jax(case, seed, method, batch):
     X, Z, XX = design(seed=seed, **case)
 
     def run():
-        out = lagp.agp(
-            X, Z, XX, start=START, end=END, criterion=method, batch=batch
-        )
+        out = lagp.agp(X, Z, XX, start=START, end=END, criterion=method, batch=batch)
         return jax.block_until_ready(out)
 
     return timeit(run)[0]
@@ -44,7 +42,9 @@ def bench_lagp(R, case, seed, method):
     return timeit(lambda: R.agp(X, Z, XX, START, END, method), repeat=1)[0]
 
 
-def run(methods, batch, skip_r, out="timing.csv") -> pd.DataFrame:
+def run(
+    methods, batch, skip_r, out="timing.csv", cases=CASES, seeds=None
+) -> pd.DataFrame:
     backend = jax_backend()
     # cpu_count reports the machine; the cgroup/scheduler affinity is what we actually get
     cores = len(os.sched_getaffinity(0))
@@ -57,10 +57,10 @@ def run(methods, batch, skip_r, out="timing.csv") -> pd.DataFrame:
             engines[f"lagp-{cores}core"] = RlaGP(threads=cores)
 
     rows = []
-    for spec in CASES:
+    for spec in cases:
         case = {k: v for k, v in spec.items() if k != "seeds"}
         for method in methods:
-            for seed in range(spec["seeds"]):
+            for seed in range(seeds if seeds is not None else spec["seeds"]):
                 for name, R in engines.items():
                     seconds = (
                         bench_jax(case, seed, method, batch)
@@ -90,5 +90,11 @@ if __name__ == "__main__":
     p.add_argument("--batch", type=int, default=64)
     p.add_argument("--skip-r", action="store_true")
     p.add_argument("--out", default="timing.csv")
+    # a walltime-bounded run wants a subset: indices into CASES, and a seed override
+    p.add_argument("--cases", nargs="+", type=int, default=None)
+    p.add_argument("--seeds", type=int, default=None)
     a = p.parse_args()
-    print(run(a.methods, a.batch, a.skip_r, a.out).to_string(index=False))
+    cases = CASES if a.cases is None else [CASES[i] for i in a.cases]
+    print(
+        run(a.methods, a.batch, a.skip_r, a.out, cases, a.seeds).to_string(index=False)
+    )
