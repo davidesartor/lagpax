@@ -106,7 +106,7 @@ hypercube subsampling (`blhs`, `blhs.loop`) as `lagpax.bootstrap`. laGP's constr
 
 The public surface is seventeen names: `GP`, `Prior`, `Range`, `Prediction`, `Fit`, `Local`, `agp`,
 `lagp`, `fit`, `alc`, `ieci`, `mspe`, `fisher`, `nn`, `bootstrap`, `distance`, `covar`. Everything
-else stays importable from its own module (`lagpax.optim.lbfgsb`, `lagpax.search.ray`,
+else stays importable from its own module (`lagpax.optim.implicit_argmin`, `lagpax.search.ray`,
 `lagpax.mle.jmle`).
 
 Conventions follow laGP throughout — correlation `exp(-sum_k (x1_k - x2_k)^2 / d_k)`, nugget `g` on
@@ -134,11 +134,19 @@ Every module is compared against R. Tolerances are not uniform, on purpose: `mea
 match to ~1e-12, while `s2` is computed as `1 + g - k' Ki k`, a cancellation whose absolute error
 tracks the O(1) intermediate rather than the ~1e-3 result, so it is checked at `rtol=1e-8`.
 
-The optimizers (`lbfgsb`, `bracketed_newton`) do not reproduce R's iterate trajectory — they find the
+The optimizers (L-BFGS-B from [vlse](https://github.com/davidesartor/vlse) for lengthscales,
+`bracketed_newton` for the nugget) do not reproduce R's iterate trajectory — they find the
 same KKT point. Tests assert that, plus that our likelihood is never worse than laGP's. On noiseless
 designs the nugget MLE pins to its lower bound in a badly conditioned regime where the two disagree
 in the 8th digit and ours is *higher*; those cases are tested as "no worse", and interior-optimum
 parity is tested on a separately generated noisy design.
+
+Beyond random designs, `tests/test_vlse.py` runs the comparison on eight benchmark surfaces from the
+SFU library (Branin, Hartmann, Michalewicz, Ackley, Rosenbrock, Goldstein-Price, Shekel). The joint
+MLE is never worse than laGP's, and is often several log-likelihood units better. aGP predictions
+agree to 1e-6 or better at the median on every surface. On the multimodal ones (Michalewicz, Ackley),
+a few locations' local fits settle in a different likelihood basin than laGP's, without a systematic
+difference in rmse.
 
 ## Performance
 
