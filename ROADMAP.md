@@ -183,16 +183,17 @@ not taken. Keep the 1-core row; it is the only way such a node announces itself.
 
 ### Before a first release
 
-- [ ] **Resolve the vlse license.** `jaxvlse` is GPL-2.0-only; lagpax is LGPL-2.0-or-later. The
-      solver is original code, so publish it under a permissive or LGPL license — split it into its
-      own package, or dual-license `vlse.optim` — and keep the GPL test functions as a test-only
-      dependency. Until then, anything distributing lagpax with its dependencies is GPL-2.0-bound.
+- [ ] **Finish the vlse license split.** Done in vlse (`vlse.optim` Apache-2.0, `vlse.functions`
+      lazy and GPL-2.0-only, version 0.1.4) but not yet merged or on PyPI. Once it is, raise
+      `pyproject.toml` to `jaxvlse>=0.1.4`; up to 0.1.3 the whole package is GPL-2.0-only.
 - [ ] **Reserve `lagpax` on PyPI with a `0.0.1` placeholder** (not `0.1.0` — see `CLAUDE.md`).
       `pyproject.toml` declares `0.1.0`; the upload has to override it or the declaration walked back.
 - [ ] **Do not weaken lagpax's own license.** It is a derivative of laGP.
 - [ ] Re-check `README.md` on scope, the speed claim and the solver whenever a criterion, search or
       dependency changes.
 - [x] CI runs the parity suite under `LAGPAX_STRICT=1`. Green on `8d8e4b4` and `3a180d3`.
+- [x] CI pins laGP to 1.5-9 from the CRAN archive and fails on any other version; it used to take
+      CRAN's newest (1.5-10) and fall back to the archive only if that failed.
 
 ### Measurement debt
 

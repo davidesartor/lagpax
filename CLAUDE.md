@@ -29,8 +29,9 @@ Full checklist in `ROADMAP.md`. The parts you must not get wrong from memory:
   unrelated project, so `lagpax` being free today proves nothing.
 - **CI must fail on a nonzero skip count.** `.github/workflows/tests.yml` installs R + laGP and sets
   `LAGPAX_STRICT=1`, which turns any skip into a nonzero exit — keep it set; it is the whole point.
-- **The license question is open.** lagpax is LGPL-2.0-or-later and now depends on `jaxvlse`, which
-  is GPL-2.0-only. See "License" below; resolve it before the first real release.
+- **Require `jaxvlse>=0.1.4` before releasing.** 0.1.4 makes `vlse.optim` Apache-2.0 and stops
+  `import vlse.optim` from loading the GPL-2.0 test functions; earlier releases are GPL-2.0-only
+  throughout. See "License" below.
 
 ## Commands
 
@@ -285,10 +286,11 @@ CRAN's *Writing R Extensions* means version 2 or later. This is a derivative wor
 laGP's source, so relicensing to MIT/Apache is not available without Gramacy's permission. `NOTICE`
 carries the attribution and citations; keep it accurate if modules are added.
 
-The `jaxvlse` dependency is **GPL-2.0-only** (its test functions are translations of GPL-2 R sources).
-Depending on it does not change lagpax's own license, but anything distributing lagpax together with
-it is bound by the GPL-2.0. The solver in `vlse/optim/lbfgsb.py` is original code, so the clean fix is
-to publish it under a permissive or LGPL license; see `ROADMAP.md` § Next.
+`jaxvlse` is mixed from 0.1.4: `vlse.functions` is GPL-2.0-only (translations of the SFU R sources),
+`vlse.optim` is Apache-2.0, and the package root loads `vlse.functions` lazily. lagpax's runtime code
+imports only `vlse.optim` — keep it that way; the test functions belong in `tests/` only. Apache-2.0
+code combines with LGPL-2.0-or-later under its version-3 terms. Releases up to 0.1.3 are GPL-2.0-only
+as a whole, which is why the floor has to move to 0.1.4 once it is on PyPI.
 
 ## Gotchas
 

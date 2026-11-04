@@ -36,6 +36,8 @@ The methods implemented here are described in:
 
 Box-constrained optimization uses `vlse.optim.minimise` from the `jaxvlse` package
 (https://github.com/davidesartor/vlse), an L-BFGS-B after Byrd, Lu, Nocedal and Zhu (1995).
-jaxvlse is distributed under GPL-2.0-only; lagpax depends on it and does not vendor it.
+lagpax imports only `vlse.optim`, which is Apache-2.0 from jaxvlse 0.1.4 (the rest of jaxvlse, its
+test functions, is GPL-2.0-only and is used by lagpax's test suite alone). lagpax depends on
+jaxvlse and does not vendor it.
 
 lagpax is not affiliated with or endorsed by the laGP authors.
