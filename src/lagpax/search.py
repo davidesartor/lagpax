@@ -20,11 +20,12 @@ from jaxtyping import Array, Bool, Float, Int, Scalar
 
 import jax
 import jax.numpy as jnp
+from vlse.optim import minimise
 
 from .covar import distance
 from .criteria import Criterion
 from .gp import GP
-from .optim import lbfgsb
+from .optim import R_FTOL
 
 Search = Callable[..., Int[Array, ""]]
 
@@ -218,7 +219,14 @@ def continuous(
     starts = Xcand[_block(taken, t, numstart)]
 
     def one(x0):
-        res = lbfgsb(objective, x0, rect[0], rect[1], maxiter=maxit)
+        res = minimise(
+            objective,
+            x0,
+            (rect[0], rect[1]),
+            tol=0.0,
+            ftol=R_FTOL,
+            max_iterations=maxit,
+        )
         return _nearest(res.x[None], Xcand, taken)
 
     ws = jnp.stack([one(starts[i]) for i in range(numstart)])

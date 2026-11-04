@@ -12,7 +12,7 @@ import pytest
 import lagpax as lagp
 from lagpax.gp import dllik_g
 from lagpax.mle import jmle, mle_d, mle_g
-from lagpax.optim import bracketed_newton, lbfgsb
+from lagpax.optim import bracketed_newton
 from lagpax.prior import Prior, Range
 
 G = 1e-4
@@ -199,15 +199,6 @@ def test_fit_estimates_only_what_the_prior_marks(small, d_est, g_est):
     assert float(out.g) == float(moved.g)
     assert (not np.allclose(np.asarray(out.d), d0)) == d_est
     assert (float(out.g) != G) == g_est
-
-
-def test_lbfgsb_on_a_bounded_quadratic():
-    """The optimum sits outside the box, so every coordinate must clamp."""
-    lo = jnp.array([0.0, 0.0])
-    hi = jnp.array([1.0, 1.0])
-    target = jnp.array([2.0, -1.0])
-    res = lbfgsb(lambda x: jnp.sum((x - target) ** 2), jnp.array([0.5, 0.5]), lo, hi)
-    np.testing.assert_allclose(np.asarray(res.x), [1.0, 0.0], atol=1e-8)
 
 
 def test_bracketed_newton_on_a_scalar_root():

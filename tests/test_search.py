@@ -16,7 +16,8 @@ import jax.numpy as jnp
 import lagpax as lagp
 from lagpax import search as searches
 from lagpax.criteria import alc
-from lagpax.optim import lbfgsb
+from lagpax.optim import R_FTOL
+from vlse.optim import minimise
 
 START, END = 6, 30
 
@@ -130,7 +131,9 @@ def test_alcoptgpsep_optima_are_stationary_for_our_gradient(R, medium):
         want_alc = R.scalar("alcGPsep(gpi, matrix(opt$par, nrow=1), Xref)")
 
         objective = lambda x: -alc(gp, x[None], jnp.asarray(Xref))[0]
-        res = lbfgsb(objective, jnp.asarray(want), rect[0], rect[1], maxiter=100)
+        res = minimise(
+            objective, jnp.asarray(want), (rect[0], rect[1]), tol=0.0, ftol=R_FTOL
+        )
         got_alc = float(alc(gp, res.x[None], jnp.asarray(Xref))[0])
 
         assert got_alc >= want_alc * (1.0 - 1e-8)

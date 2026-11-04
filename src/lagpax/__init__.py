@@ -5,7 +5,7 @@ Everything here is float64 and follows laGP's parameterization: the correlation 
 zero-mean unless a trend is asked for, and the scale is profiled out (`phi = Z' Ki Z`).
 
 The public surface is deliberately small. Everything else stays importable from its own
-module -- `lagpax.optim.lbfgsb`, `lagpax.covar.dcovar`, `lagpax.mle.jmle`, `lagpax.search.ray`.
+module -- `lagpax.optim.implicit_argmin`, `lagpax.covar.dcovar`, `lagpax.mle.jmle`, `lagpax.search.ray`.
 """
 
 import jax

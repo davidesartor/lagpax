@@ -5,9 +5,10 @@ from jaxtyping import Array, Float, Int, Scalar
 
 import jax
 import jax.numpy as jnp
+from vlse.optim import minimise
 
 from .gp import GP, llik_d, llik_dg, llik_g
-from .optim import bracketed_newton, implicit_argmin, lbfgsb
+from .optim import R_FTOL, bracketed_newton, implicit_argmin
 from .prior import Prior
 
 sg = jax.lax.stop_gradient
@@ -50,12 +51,22 @@ def _solve_d(gp: GP, d0, g, dmin, dmax, ab, maxit: int):
     Hyperparameters come in as arguments and go out as arguments: `jmle` alternates over
     them, and rebuilding the GP between half-steps would factorize a K nothing reads.
     """
-    res = lbfgsb(lambda d: -llik_dg(gp, d, g, dab=ab), d0, dmin, dmax, maxiter=maxit)
+    res = minimise(
+        lambda d: -llik_dg(gp, d, g, dab=ab),
+        d0,
+        bounds=(dmin, dmax),
+        tol=0.0,
+        ftol=R_FTOL,
+        max_iterations=maxit,
+    )
+    # R's convergence code: 1 only when maxit ran out before any stopping rule fired
+    stopped = (res.error <= 0.0) | res.converged_ftol | res.failed_linesearch
+    conv = jnp.where(stopped | (res.iteration < maxit), 0, 1)
 
     # laGP resets rather than optimizing when started on the lower boundary
     reset = jnp.any(d0 <= dmin)
     d = jnp.where(reset, 0.9 * dmin + 0.1 * dmax, res.x)
-    return d, jnp.where(reset, 0, res.its), jnp.where(reset, 102, res.conv)
+    return d, jnp.where(reset, 0, res.iteration), jnp.where(reset, 102, conv)
 
 
 def _solve_g(gp: GP, d, g0, gmin, gmax, ab, maxit: int):

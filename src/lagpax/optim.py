@@ -1,14 +1,19 @@
-"""Box-constrained L-BFGS-B (from vlse) and safeguarded Newton, standing in for R's optim/optimize."""
+"""Safeguarded Newton and the implicit-argmin gradient; box-constrained solves use vlse.
+
+Lengthscale and continuous-search solves call `vlse.optim.minimise` (L-BFGS-B) directly,
+with R's optim stopping rule: `factr = 1e7` scaled by machine epsilon is scipy's `ftol`,
+and `pgtol = 0` disables the projected-gradient test. `R_FTOL` is that product.
+"""
 
 from typing import Callable, NamedTuple, Optional
 from jaxtyping import Array, Bool, Float, Int, Scalar
 
 import jax
 import jax.numpy as jnp
-from vlse.optim import minimise
 
 EPSMCH = float(jnp.finfo(jnp.float64).eps)
 SDEPS = float(jnp.sqrt(EPSMCH))
+R_FTOL = 1e7 * EPSMCH  # optim(method="L-BFGS-B")'s default factr, as scipy's ftol
 
 
 def implicit_argmin(
@@ -20,8 +25,8 @@ def implicit_argmin(
 ) -> Float[Array, "n"]:
     """Give a solver's answer the gradient the argmin has. The value is returned unchanged.
 
-    Both solvers below are `lax.while_loop`s, which reverse-mode cannot differentiate, and
-    unrolling them would differentiate the iterates rather than the answer. Instead: at an
+    Both solvers (vlse's L-BFGS-B and `bracketed_newton`) are `lax.while_loop`s, which
+    reverse-mode cannot differentiate, and unrolling them would differentiate the iterates rather than the answer. Instead: at an
     interior optimum `grad fun(x) = 0`, so the implicit function theorem moves the argmin
     with the upstream data as `-H^-1 d(grad fun)/d(upstream)`. One Newton step taken from a
     frozen `x` has exactly that derivative, and subtracting its own `stop_gradient` leaves
@@ -45,52 +50,6 @@ def implicit_argmin(
     # gradient rather than propagating a NaN through an otherwise valid prediction
     step = jnp.where(free & jnp.isfinite(step), step, 0.0)
     return x - (step - jax.lax.stop_gradient(step))
-
-
-class LbfgsbResult(NamedTuple):
-    """Optimizer outcome; `conv` is 0 on convergence and 1 when maxiter was hit."""
-
-    x: Float[Array, "n"]
-    f: Scalar
-    its: Int
-    conv: Int
-
-
-def lbfgsb(
-    fun: Callable[[Float[Array, "n"]], Scalar],
-    x0: Float[Array, "n"],
-    lower: Float[Array, "n"],
-    upper: Float[Array, "n"],
-    maxiter: int = 100,
-    history: int = 10,
-    factr: float = 1e7,
-    pgtol: float = 0.0,
-    max_linesearch: int = 20,
-) -> LbfgsbResult:
-    """Minimize `fun` over a box with vlse's L-BFGS-B, in R's optim vocabulary.
-
-    The solver is `vlse.optim.minimise` (the `jaxvlse` distribution): Byrd-Lu-Nocedal-Zhu
-    with the generalized Cauchy point, subspace minimisation and scipy's dcsrch line search.
-    This wrapper only translates R's stopping rules -- `factr` is scaled by machine epsilon
-    into scipy's `ftol`, `pgtol` is the projected-gradient tolerance -- and reports R's
-    `convergence` code: 0 when a stopping rule fired, 1 when `maxiter` ran out first.
-    """
-    n = x0.shape[0]
-    lower = jnp.broadcast_to(jnp.asarray(lower, x0.dtype), (n,))
-    upper = jnp.broadcast_to(jnp.asarray(upper, x0.dtype), (n,))
-    res = minimise(
-        fun,
-        x0,
-        bounds=(lower, upper),
-        tol=jnp.asarray(pgtol, x0.dtype),
-        ftol=jnp.asarray(factr * EPSMCH, x0.dtype),
-        max_iterations=maxiter,
-        history_length=history,
-        max_linesearch=max_linesearch,
-    )
-    stopped = (res.error <= pgtol) | res.converged_ftol | res.failed_linesearch
-    conv = jnp.where(stopped | (res.iteration < maxiter), 0, 1)
-    return LbfgsbResult(x=res.x, f=res.f, its=res.iteration, conv=conv)
 
 
 class NewtonResult(NamedTuple):

@@ -81,7 +81,7 @@ def test_a_coordinate_on_a_bound_has_exactly_zero_gradient(quad):
 def _exact_argmin_d(X, Z, d0, g, warm):
     """d* solved from the stationarity condition itself, good to machine precision.
 
-    Finite differences of `lbfgsb`'s own output cannot check this gradient: it stops on R's
+    Finite differences of the L-BFGS-B solve's own output cannot check this gradient: it stops on R's
     `factr`, so it returns roughly eight significant digits, and a central difference of
     that carries |d| * 1e-8 / 2h of noise -- around 7e-5 at the largest step truncation
     allows. Root-finding `grad llik = 0` removes that floor.
@@ -210,7 +210,7 @@ def test_the_scheme_vmaps_over_datasets(medium):
     batched = jax.vmap(run)(Zs)
 
     # `vmap` rewrites the arithmetic and a batched `while_loop` shares its trip count, so
-    # one ulp of difference in the likelihood flips `lbfgsb`'s relative-change stopping test
+    # one ulp of difference in the likelihood flips L-BFGS-B's relative-change stopping test
     # and the two runs stop at different iterates -- separated by the solver's own
     # resolution, sqrt(factr * eps) ~ 4.7e-5 relative in `d`. The likelihood is stationary
     # there, so the gap it induces is *second* order in that: ~2e-6 relative, which is what
@@ -229,7 +229,7 @@ def test_the_scheme_vmaps_over_datasets(medium):
 def test_gradients_reach_the_data_through_the_whole_scheme(noisy):
     """The end-to-end claim: `jax.grad` of a prediction w.r.t. the training responses.
 
-    The comparison is a finite difference of the pipeline, so it inherits `lbfgsb`'s
+    The comparison is a finite difference of the pipeline, so it inherits L-BFGS-B's
     stopping tolerance -- see `_exact_argmin_d` for why that floors the agreement; with
     vlse's L-BFGS-B at R's factr it lands near 2e-3. The exactly-solved comparisons above are what pin the gradient itself.
     """
