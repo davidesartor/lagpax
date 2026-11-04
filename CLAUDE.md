@@ -76,11 +76,16 @@ is `Z` and `df` is `n`.
 - `prior.py` — host-side numpy/scipy port of `darg`/`garg`/`getDs`/`Igamma.inv`, behind
   `Prior.from_design`. Deliberately *not* jitted: it runs once per call and R's `quantile` type 7 ==
   numpy's default.
-- `optim.py` — `lbfgsb` (projected L-BFGS, Armijo on the projected arc, R's `factr`/`pgtol` stopping
-  rules), `bracketed_newton` for the nugget, and `implicit_argmin`. `bracketed_newton` takes one
+- `optim.py` — `lbfgsb`, a thin adapter over `vlse.optim.minimise` (the `jaxvlse` package, full
+  L-BFGS-B with Cauchy point, subspace step and scipy's dcsrch) that translates R's `factr`/`pgtol` stopping
+  rules and reports R's conv code; `bracketed_newton` for the nugget, and `implicit_argmin`. `bracketed_newton` takes one
   `dfun` returning `(d, d2)` rather than two callables, so the nugget MLE gets both derivatives from
   a single factorization per iteration. Neither solver reproduces R's iterate trajectory; they find
   the same KKT point. Tests assert that, plus "our llik is no worse than laGP's".
+  vlse replaced a hand-rolled projected L-BFGS (21 parallel Armijo probes) that lived here until
+  then. At `factr=1e7` it takes fewer iterations but stops less stationary (|grad| 2.7e-5 against
+  1.7e-6 on `noisy[:60]`), so the fitted map is rougher: finite differences of the pipeline need
+  `h <= 1e-5`, and `test_diff` tolerances were widened to match. vlse is GPL-2.0-only; see `NOTICE`.
 - `mle.py` — `mle_d` (with laGP's `0.9*dmin + 0.1*dmax` boundary reset, conv=102), `mle_g`, `jmle`,
   and `fit` dispatching on the prior's `estimate` flags. `jmle` carries `(d, g)` through its
   `while_loop` rather than a GP, so the alternating half-steps stop factorizing a `K` nobody reads.

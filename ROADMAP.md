@@ -115,7 +115,7 @@ What did not, and should not be retried without new evidence:
 - **fp32 for the ALC selection stage.** Follows from the above — selection is not arithmetic-bound,
   so halving the precision buys nothing and costs the argmax its ties. Not separately measured;
   listed as a lever for a long time and refuted by the gemm result.
-- **Fewer Armijo probes in `lbfgsb`** (21 -> 4): 0% faster, and it destroys the answer (3.3e-2) as
+- **Fewer Armijo probes in `lbfgsb`** (21 -> 4; the pre-vlse solver): 0% faster, and it destroys the answer (3.3e-2) as
   `its` collapses to 1.2. A blocked line search was tried and reverted earlier for the same reason:
   the probes go out as one `vmap` and XLA spreads them, so saving flops saves no time.
 - **Looser `factr`** (1e7 -> 1e13): cuts iterations 2.1x for only -12% wall clock, at 1.6e-4 of

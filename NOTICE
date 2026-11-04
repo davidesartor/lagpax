@@ -34,4 +34,8 @@ The methods implemented here are described in:
     on Uncertainty Quantification, 7(2), 720-759. (Block Latin hypercube
     subsampling; `blhs.py`.)
 
+Box-constrained optimization uses `vlse.optim.minimise` from the `jaxvlse` package
+(https://github.com/davidesartor/vlse), an L-BFGS-B after Byrd, Lu, Nocedal and Zhu (1995).
+jaxvlse is distributed under GPL-2.0-only; lagpax depends on it and does not vendor it.
+
 lagpax is not affiliated with or endorsed by the laGP authors.
