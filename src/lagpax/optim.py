@@ -49,8 +49,8 @@ def implicit_argmin(
     A coordinate pinned to a bound is not a stationary point, so it stays frozen and its
     gradient is zero -- the honest answer for an active constraint, not a smooth one. Pass
     `free` to freeze more than the bounds do; the remaining coordinates then get the
-    derivative of the argmin over them with the frozen ones held fixed, which is what the
-    caller means when the lengthscale came from laGP's boundary reset rather than a solve.
+    derivative of the argmin over them with the frozen ones held fixed -- for a caller whose
+    value for some coordinates did not come from a solve.
     """
     x = jax.lax.stop_gradient(x)
     interior = (x > lower) & (x < upper)

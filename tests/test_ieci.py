@@ -21,9 +21,9 @@ def _new_gpsep(R, gp):
     R(
         "gpi <- newGPsep(Xd, Zd, d=dd, g=gg, dK=TRUE)",
         Xd=np.asarray(gp.X),
-        Zd=np.asarray(gp.Z),
-        dd=np.asarray(gp.d),
-        gg=np.array([float(gp.g)]),
+        Zd=np.asarray(gp.y),
+        dd=np.asarray(gp.theta),
+        gg=np.array([float(gp.nugget)]),
     )
 
 
@@ -111,29 +111,30 @@ def test_ieci_gradient_matches_finite_differences(small):
     np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-12)
 
 
-def test_agp_runs_with_ieci(medium):
+def test_the_local_model_runs_with_ieci(medium):
     """Acceptance: a configurable criterion drops into the local scheme unchanged."""
     X, Z = medium
     XX = np.random.default_rng(4).random((6, X.shape[1]))
     fmin = float(Z.min())
-    out = lagp.agp(X, Z, XX, start=6, end=20, criterion=lagp.IECI(fmin=fmin), batch=3)
+    model = lagp.LocalGP(init=6, neighbors=20)
+    out = model.replace(criterion=lagp.IECI(fmin=fmin)).fit(X, Z)(XX, batch=3)
     assert np.all(np.isfinite(np.asarray(out.mean)))
-    assert np.asarray(out.Xi).shape == (6, 20)
+    assert np.asarray(out.neighbors).shape == (6, 20)
 
     # one reference location, so ECI is monotone in the variance reduction there and the
     # minimize criterion has to reproduce ALC's design exactly -- proof the direction is
     # handled generically rather than by luck
-    alc_design = lagp.agp(X, Z, XX, start=6, end=20, batch=3).Xi
-    np.testing.assert_array_equal(np.asarray(out.Xi), np.asarray(alc_design))
+    alc_design = model.fit(X, Z)(XX, batch=3).neighbors
+    np.testing.assert_array_equal(np.asarray(out.neighbors), np.asarray(alc_design))
 
     # with several reference locations the monotone tie breaks and the designs diverge
     Xref = XX[:3]
-    ours = lagp.lagp(X, Z, Xref, start=6, end=20, criterion=lagp.IECI(fmin=fmin)).Xi
-    theirs = lagp.lagp(X, Z, Xref, start=6, end=20).Xi
+    ours = model.replace(criterion=lagp.IECI(fmin=fmin)).fit(X, Z).local(Xref).neighbors
+    theirs = model.fit(X, Z).local(Xref).neighbors
     assert not np.array_equal(np.asarray(ours), np.asarray(theirs))
 
 
 def test_ieci_by_name_explains_it_needs_fmin(medium):
     X, Z = medium
     with pytest.raises(ValueError, match="fmin"):
-        lagp.agp(X, Z, X[:2] + 0.01, start=6, end=20, criterion="ieci")
+        lagp.LocalGP(init=6, neighbors=20, criterion="ieci")

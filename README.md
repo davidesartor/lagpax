@@ -33,138 +33,136 @@ uv sync --extra tests               # + pytest and rpy2 for the parity suite
 import jax
 import numpy as np
 
-jax.config.update("jax_enable_x64", True)   # laGP is float64; lagpax follows your dtype
+jax.config.update("jax_enable_x64", True)   # float64, as laGP; lagpax follows your dtype
 import lagpax
 
 X = np.random.uniform(size=(2000, 4))
-Z = np.sum(np.sin(4 * X), axis=1)
-XX = np.random.uniform(size=(500, 4))
+y = np.sum(np.sin(4 * X), axis=1)
+Xnew = np.random.uniform(size=(500, 4))
 
-key = jax.random.key(0)    # laGP's darg subsamples designs over 1000 rows; no hidden RNG here
-out = lagpax.agp(X, Z, XX, key=key, start=6, end=50, criterion="alc")
+key = jax.random.key(0)    # the default prior subsamples designs over 1000 rows; no hidden RNG
+model = lagpax.LocalGP(neighbors=50, criterion="alc")
+emulator = model.fit(X, y, key=key)
+prediction = emulator(Xnew)
 
-out.mean   # (500,) predictive mean
-out.var    # (500,) predictive variance
-out.Xi     # (500, 50) local design indices, 0-based
+prediction.mean        # (500,) predictive mean
+prediction.variance    # (500,) predictive variance (Student-t, with `dof` degrees of freedom)
+prediction.neighbors   # (500, 50) rows of X each local GP used
+prediction.fit.theta   # (500, 4) each local GP's fitted kernel parameters
 ```
 
-`criterion` and `search` are a grid, not a list of methods. `criterion="nn"` takes nearest
-neighbours, `criterion="alc"` grows the design greedily by Active Learning Cohn (Gramacy & Apley,
-2015), and `criterion=lagpax.IECI(fmin=...)` scores candidates by expected improvement instead of
-variance, for when the emulator serves optimization. `criterion=lagpax.MSPE(fi=True)` adds the error
-from re-estimating the lengthscale once the point is added, and `criterion="fisher"` picks the point
-that most sharpens the hyperparameter estimate rather than the prediction — useful when the local fit
-is unstable, and the one criterion that needs no reference set. `search="exhaustive"` scores every
-candidate; `search="ray"` and `search="continuous"` (or `lagpax.Ray(numrays=...)`,
-`lagpax.Continuous(numstart=...)`) cost a fixed number of criterion evaluations per greedy step
-regardless of how many candidates there are, which is what makes the scheme usable on large datasets.
-A plain function `(gp, Xcand, Xref) -> scores` drops in as a criterion, or subclass
-`lagpax.Criterion`.
+Each row of `Xnew` gets its own GP on `neighbors` training points. The first `init` (default 6)
+are its nearest neighbours; the rest are chosen greedily by the `criterion`:
 
-Criteria and searches are small JAX pytrees. Settings that change the program (`MSPE.fi`,
-`Ray.numrays`) are static; settings that are numbers are leaves, so a Bayesian-optimization loop
-that moves `IECI.fmin` every step reuses one compiled program.
+- `"nn"` — nearest neighbours only.
+- `"alc"` — Active Learning Cohn: the point that most reduces predictive variance at the target
+  (Gramacy & Apley, 2015). The default.
+- `lagpax.IECI(fmin=...)` — integrated expected conditional improvement, for when the emulator
+  serves optimization.
+- any function `(gp, Xcand, Xref) -> scores`, or a `lagpax.Criterion` subclass.
 
-Reuse the settings and the design-derived prior across calls by conditioning once:
+and searched by the `search`: `"exhaustive"` scores every candidate, while `"ray"` and
+`"continuous"` (`lagpax.Ray(numrays=...)`, `lagpax.Continuous(numstart=...)`) cost a fixed number
+of evaluations per step however many candidates there are, which is what keeps large datasets
+tractable.
+
+### The kernel and its prior
+
+The kernel is `exp(-sum_k (x_k - x'_k)^2 / theta_k)` plus a `nugget` on the diagonal, with the
+scale profiled out. `theta` is a squared lengthscale; `FitInfo.lengthscale` gives the
+conventional `l = sqrt(theta / 2)`. Each local GP fits `theta` (and, optionally, the nugget) by
+MAP under a `Prior`, whose defaults come from the data:
 
 ```python
-emu = lagpax.Local(start=6, end=50, criterion="alc").condition(X, Z)
-out = emu.predict(XX, batch=256)
-out = emu.refine(XX, passes=("nn", "alc"))   # warm-start each location from its own fit
-one = emu.local(XX[:1])                      # a single reference set, as laGPsep
+prior = lagpax.Prior.from_data(X, y, key=key)                       # Gamma prior on theta
+prior = lagpax.Prior.from_data(X, y, key=key, space="lengthscale")  # ... or on l instead
+prior = prior.replace(nugget=lagpax.Param(learn=True))              # also learn the nugget
+emulator = model.fit(X, y, prior=prior)
 ```
 
-`emu.local` is the per-location primitive, and `predict` is `jax.lax.map` over it. To batch
-differently, map it yourself: `jax.vmap(lambda x: emu.local(x[None]))(XX)`.
+The two spaces have the same likelihood but different MAP estimates, since a Gamma density on `l`
+is not one on `theta`. The default, `theta`, reproduces laGP exactly.
 
-On a design too large to fit globally, `bootstrap` estimates one lengthscale from many small block
-Latin hypercube subsamples (`blhs.loop`) and hands it back as a prior, either as a starting point or
-— as laGP uses it — held fixed:
+### Composing with JAX
+
+`fit` resolves the prior — the one host-side step — and returns an `Emulator`, which is a pytree:
+the data and prior are leaves, the model's sizes are static. So it crosses `jax.jit`, takes new
+data with `emulator._replace(y=...)`, and differentiates as a whole:
 
 ```python
-prior = lagpax.bootstrap(X, Z, m=2, K=32, key=key)         # -> Prior, d.start from the subsamples
-prior = prior.at(d=lagpax.Range(estimate=False))           # laGP's use: one global, fixed d
-out = lagpax.agp(X, Z, XX, prior=prior)
+prior = lagpax.Prior.from_data(X, y, key=key)
+model = lagpax.LocalGP(neighbors=50, search="ray")
+
+def total(y):
+    return model.fit(X, y, prior=prior)(Xnew).mean.sum()
+
+grad = jax.grad(total)(y)                            # jax.jit(total) works too
 ```
 
-`condition` resolves the prior — the one host-side step — so everything after it is pure JAX.
-The emulator it returns is itself a pytree (the data and prior are leaves, the scheme's sizes are
-static), so it can be passed into `jax.jit`, rebuilt on new data with `emu._replace(Z=...)`, and
-differentiated through as a whole:
+Gradients run through each local hyperparameter fit by the implicit function theorem at the
+optimum, so they cost one small Hessian solve rather than a tape over the optimizer's iterates. A
+hyperparameter resting on a bound — a nugget pinned at its floor on noiseless data — is an active
+constraint, and its gradient is reported as exactly zero rather than smoothed over.
 
-```python
-prior = lagpax.Prior.from_design(X, Z, key=key)        # resolved once, on the host
-scheme = lagpax.Local(start=6, end=50, search="ray")
+`emulator.local(Xref)` is the per-location primitive (one GP for a whole reference set, with
+`full_cov=True` for a joint covariance); `emulator(Xnew, batch=256)` is `jax.lax.map` over it, and
+`jax.vmap(lambda x: emulator.local(x[None]))(Xnew)` batches it with vmap instead.
+`emulator.refine(Xnew, passes=("nn", "alc"))` predicts in passes, each starting every location
+from the last pass's fit — designs are chosen at the *starting* `theta`, so this picks
+neighbourhoods that respect which inputs matter, cutting rmse ~1.7-2x on anisotropic problems.
 
-def total(Z):
-    return scheme.condition(X, Z, prior=prior).predict(XX).mean.sum()
-
-grad = jax.grad(total)(Z)                              # jax.jit(total) works too
-```
-
-Gradients run through the fitted hyperparameters by the implicit function theorem at the optimum, so
-they cost one small Hessian solve rather than a tape over the optimizer's iterates. A hyperparameter
-resting on a bound — a nugget pinned at its floor on noiseless data, or laGP's `conv=102` lengthscale
-reset — is an active constraint, and its gradient is reported as exactly zero rather than smoothed
-over.
+Criteria and searches are small pytrees too: settings that change the program (`IECI.nugget`,
+`Ray.numrays`) are static, settings that are numbers are leaves, so a Bayesian-optimization loop
+that moves `IECI.fmin` every step reuses one compiled program. Nothing in lagpax touches global JAX
+state, and there is no hidden randomness: anything random takes a `jax.random` key.
 
 ## Scope
 
-The separable (`GPsep`) family of laGP 1.5.9: GP construction, likelihood and predictive equations,
-design-derived priors (`darg`/`garg`), lengthscale and nugget MLE/MAP (`mleGPsep`, `jmleGPsep`),
-ALC (`alcGPsep`) with ray and continuous search (`alcrayGPsep`, `alcoptGPsep`), IECI (`ieciGPsep`),
-and the local schemes `laGPsep`, `aGPsep` and `aGP.seq`. Isotropic `GP` routines
-are a special case of the separable ones — pass a scalar `d` — which is also where laGP keeps MSPE
-(`mspeGP`) and the Fisher-information criterion (`fishGP`), both ported here, along with block Latin
-hypercube subsampling (`blhs`, `blhs.loop`) as `lagpax.bootstrap`. laGP's constrained-optimization
-(`optim.auglag`) and calibration (`fcalib`) layers are out of scope.
+Equivalent to the separable (`GPsep`) core of laGP 1.5.9: GP likelihood and predictive equations,
+data-driven default priors (`darg`/`garg`), MAP estimation of the kernel parameter and nugget
+(`mleGPsep`, `jmleGPsep`), the ALC and IECI criteria with exhaustive, ray and continuous search
+(`alcGPsep`, `alcrayGPsep`, `alcoptGPsep`, `ieciGPsep`), and the local schemes (`laGPsep`,
+`aGPsep`, `aGP.seq`) — under its own API, not laGP's. Beyond laGP: `trend="constant"`/`"linear"`
+for better-calibrated intervals, gradients through fitting, and a prior on the conventional
+lengthscale.
 
-The public surface is the GP and its fit (`GP`, `Prior`, `Range`, `Prediction`, `Fit`, `fit`,
-`bootstrap`, `distance`, `covar`), the local scheme (`Local`, `Conditioned`, `agp`, `lagp`), the
-criteria (`Criterion`, `ALC`, `NN`, `MSPE`, `IECI`, `Fisher`, `Custom`, and the instances `alc`,
-`nn`, `fisher`) and the searches (`Search`, `Exhaustive`, `Ray`, `Continuous`). Everything else
-stays importable from its own module (`lagpax.optim.implicit_argmin`, `lagpax.mle.jmle`).
+Deliberately left out: laGP's MSPE and Fisher-information criteria, block Latin hypercube
+lengthscale bootstrapping (`blhs`), its refusal to optimize from a start on the lower bound
+(`conv=102`), the raw-scale-vs-variance split between `laGPsep` and `aGPsep` (lagpax always returns
+the variance), and the constrained-optimization (`optim.auglag`) and calibration (`fcalib`) layers.
 
-Conventions follow laGP throughout — correlation `exp(-sum_k (x1_k - x2_k)^2 / d_k)`, nugget `g` on
-the diagonal, scale profiled out as `phi = Z' Ki Z`, Student-t predictive. Two deliberate
-differences: `Xi` indices are 0-based (R is 1-based), and randomness takes an explicit
-`jax.random` key where R uses its global RNG. Computation follows the input dtype; laGP parity
-needs `jax_enable_x64`, which lagpax does not switch on for you. One API difference:
-laGP's `laGPsep` returns a raw `s2` while `aGPsep` returns `s2 * df/(df - 2)`; here both return a
-`Prediction` carrying `s2`, `df` and a `var` property, so the conversion is explicit.
-
-The default `trend="zero"` is **simple kriging**, matching laGP: the process is zero-mean with no
-trend basis, so you should center `Z` yourself — an uncentered response inflates `phi`, which makes
-`s2` wrong and not just the mean. `trend="constant"` and `trend="linear"` profile out a mean
-alongside the scale (ordinary and universal kriging). They are not in laGP, and they are sold as
-calibration rather than accuracy: simple kriging omits the variance contribution from not knowing
-the trend coefficients, so its intervals are too narrow, especially at design boundaries.
+The default `trend="zero"` is **simple kriging**, matching laGP: center `y` yourself — an
+uncentered response inflates the profiled scale, which makes the variance wrong and not just the
+mean. `trend="constant"` and `trend="linear"` profile out a mean too, and are sold as interval
+calibration rather than accuracy: simple kriging omits the variance from not knowing the trend, so
+its intervals are too narrow, especially at design boundaries.
 
 ## Parity
 
 ```bash
-module load r/4.4.0 && export R_HOME=$(R RHOME)
+export R_HOME=$(R RHOME)
 uv sync --extra tests
-uv run --no-sync pytest tests -q
+LAGPAX_STRICT=1 uv run --no-sync pytest tests -q
 ```
 
-Every module is compared against R. Tolerances are not uniform, on purpose: `mean`, `llik` and `phi`
-match to ~1e-12, while `s2` is computed as `1 + g - k' Ki k`, a cancellation whose absolute error
-tracks the O(1) intermediate rather than the ~1e-3 result, so it is checked at `rtol=1e-8`.
+Everything with a laGP counterpart is compared against R. Tolerances are not uniform, on purpose:
+means and log-likelihoods match to ~1e-12, while the variance is `1 + g - k' Ki k`, a cancellation
+whose absolute error tracks the O(1) intermediate rather than the ~1e-3 result, so it is checked at
+`rtol=1e-8`.
 
-The optimizers (L-BFGS-B from [vlse](https://github.com/davidesartor/vlse) for lengthscales,
-`bracketed_newton` for the nugget) do not reproduce R's iterate trajectory — they find the
+The optimizers (L-BFGS-B from [vlse](https://github.com/davidesartor/vlse) for `theta`, a
+safeguarded Newton iteration for the nugget) do not reproduce R's iterate trajectory — they find the
 same KKT point. Tests assert that, plus that our likelihood is never worse than laGP's. On noiseless
-designs the nugget MLE pins to its lower bound in a badly conditioned regime where the two disagree
-in the 8th digit and ours is *higher*; those cases are tested as "no worse", and interior-optimum
+designs the nugget pins to its lower bound in a badly conditioned regime where the two disagree in
+the 8th digit and ours is *higher*; those cases are tested as "no worse", and interior-optimum
 parity is tested on a separately generated noisy design.
 
 Beyond random designs, `tests/test_vlse.py` runs the comparison on eight benchmark surfaces from the
 SFU library (Branin, Hartmann, Michalewicz, Ackley, Rosenbrock, Goldstein-Price, Shekel). The joint
-MLE is never worse than laGP's, and is often several log-likelihood units better. aGP predictions
-agree to 1e-6 or better at the median on every surface. On the multimodal ones (Michalewicz, Ackley),
-a few locations' local fits settle in a different likelihood basin than laGP's, without a systematic
-difference in rmse.
+MAP fit is never worse than laGP's, and is often several log-likelihood units better. Predictions
+agree to 1e-6 or better at the median on every surface. On the multimodal ones (Michalewicz,
+Ackley), a few locations' local fits settle in a different likelihood basin than laGP's, without a
+systematic difference in rmse.
 
 ## Performance
 
@@ -182,7 +180,7 @@ Those fits hold to within 0.09 s across a 1000x range in the location count, and
 256,000-location times from data taken below 16,000. laGP has no fixed term; we have a few seconds
 of one, so below the break-even laGP wins outright — at 250 locations it is 2x ahead on ALC and 5x on
 nearest-neighbour. Above it the per-location rate decides, and the advantage is larger for the more
-expensive criterion, which is the case for shipping MSPE, IECI and Fisher rather than only ALC.
+expensive criterion.
 
 That table is conservative: it was taken at `batch=64`, and a later sweep on a second A100 found the
 per-location rate falls **1.44x** going to `batch=256` for both criteria, which is now the default.
@@ -207,9 +205,9 @@ By XLA's own cost model one local GP at `end=50` went from 3.21e7 to 1.68e7 flop
 selection, and 2.58e7 to 1.04e7 with nearest-neighbour. Design selection, untouched, is now the
 larger half of what remains.
 
-Reproduce with `uv run -m bench.timing` and `uv run -m bench.accuracy`. Note that `bench/common.py`
+Reproduce with `uv run --no-sync -m bench.timing` and `uv run --no-sync -m bench.accuracy`. Note that `bench/common.py`
 pins `OPENBLAS_NUM_THREADS=1` before jax or R load, and that `accuracy.py` hands both sides the same
-`darg` prior — without that it measures the RNG gap rather than the port.
+default prior — without that it measures the RNG gap rather than the port.
 
 ## Related work
 

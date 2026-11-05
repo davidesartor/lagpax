@@ -41,16 +41,8 @@ def bench_jax(case, seed, method, batch):
     X, Z, XX = design(seed=seed, **case)
 
     def run():
-        out = lagp.agp(
-            X,
-            Z,
-            XX,
-            key=jax.random.key(seed),
-            start=START,
-            end=END,
-            criterion=method,
-            batch=batch,
-        )
+        model = lagp.LocalGP(init=START, neighbors=END, criterion=method)
+        out = model.fit(X, Z, key=jax.random.key(seed))(XX, batch=batch)
         return jax.block_until_ready(out)
 
     # a repeat costs a full pass, and the spread shrinks as the pass gets longer

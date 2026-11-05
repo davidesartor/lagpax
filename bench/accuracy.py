@@ -31,14 +31,13 @@ def run() -> pd.DataFrame:
                 X, Z, XX = design(seed=seed, **case)
                 # both sides get the same prior; darg's own subsample is RNG-dependent
                 d = darg(None, X, key=jax.random.key(seed))
-                prior = Prior(d=d, g=garg(1 / 10000, Z))
-                ours = lagp.agp(
-                    X, Z, XX, prior=prior, start=START, end=END, criterion=method
-                )
+                prior = Prior(theta=d, nugget=garg(1 / 10000, Z))
+                model = lagp.LocalGP(init=START, neighbors=END, criterion=method)
+                ours = model.fit(X, Z, prior=prior)(XX)
                 mean, var = R.agp(X, Z, XX, START, END, method, d=d)
 
                 mean_err = relative_error(np.asarray(ours.mean), mean)
-                var_err = relative_error(np.asarray(ours.var), var)
+                var_err = relative_error(np.asarray(ours.variance), var)
                 spread = float(np.std(mean))
                 rows.append(
                     dict(

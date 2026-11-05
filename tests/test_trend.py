@@ -26,14 +26,14 @@ def test_zero_trend_is_the_untrended_model(small):
     X, Z = small
     plain, zero = _gp(X, Z, "zero"), lagp.GP(jnp.asarray(X), jnp.asarray(Z), D, G)
     assert plain.p == 0
-    assert float(plain.df) == float(zero.df) == len(X)
+    assert float(plain.dof) == float(zero.dof) == len(X)
 
     XX = X[:5] + 0.05
     np.testing.assert_array_equal(
         np.asarray(plain.predict(XX).mean), np.asarray(zero.predict(XX).mean)
     )
     np.testing.assert_array_equal(
-        np.asarray(plain.predict(XX).s2), np.asarray(zero.predict(XX).s2)
+        np.asarray(plain.predict(XX).variance), np.asarray(zero.predict(XX).variance)
     )
 
 
@@ -42,12 +42,8 @@ def test_degrees_of_freedom_drop_one_per_coefficient(small, trend, p):
     X, Z = small
     gp = _gp(X, Z, trend)
     assert gp.p == p
-    assert float(gp.df) == len(X) - p
-
-    pred = gp.predict(X[:3] + 0.05)
-    np.testing.assert_allclose(
-        np.asarray(pred.var), np.asarray(pred.s2) * (len(X) - p) / (len(X) - p - 2)
-    )
+    assert float(gp.dof) == len(X) - p
+    assert float(gp.predict(X[:3] + 0.05).dof) == len(X) - p
 
 
 def test_constant_trend_coefficient_is_the_gls_mean(small):
@@ -92,12 +88,14 @@ def test_mask_matches_a_smaller_design_with_a_trend(small):
         padded = _gp(X, Z, trend, mask=mask)
         exact = _gp(X[:k], Z[:k], trend)
 
-        assert float(padded.df) == float(exact.df)
+        assert float(padded.dof) == float(exact.dof)
         np.testing.assert_allclose(
             np.asarray(padded.b), np.asarray(exact.b), rtol=1e-10
         )
         assert float(padded.phi) == pytest.approx(float(exact.phi), rel=1e-10)
-        assert float(padded.llik()) == pytest.approx(float(exact.llik()), rel=1e-10)
+        assert float(padded.log_likelihood()) == pytest.approx(
+            float(exact.log_likelihood()), rel=1e-10
+        )
 
         XX = X[:5] + 0.05
         a, b = padded.predict(XX), exact.predict(XX)
@@ -105,7 +103,7 @@ def test_mask_matches_a_smaller_design_with_a_trend(small):
             np.asarray(a.mean), np.asarray(b.mean), rtol=1e-10, atol=1e-12
         )
         np.testing.assert_allclose(
-            np.asarray(a.s2), np.asarray(b.s2), rtol=1e-8, atol=1e-12
+            np.asarray(a.variance), np.asarray(b.variance), rtol=1e-8, atol=1e-12
         )
 
 
@@ -128,7 +126,9 @@ def _coverage(trend, reps=200, seed=2):
         xx = np.array([[x[-1, 0] + 0.4]])
         gp = lagp.GP(x, Z, np.array([0.05]), 1e-4, trend=trend)
         pred = gp.predict(xx)
-        half = student_t.ppf(0.95, float(pred.df)) * float(np.sqrt(pred.s2[0]))
+        df = float(pred.dof)
+        scale = float(pred.variance[0]) * (df - 2) / df  # the Student-t scale, squared
+        half = student_t.ppf(0.95, df) * np.sqrt(scale)
         hits += abs(float(pred.mean[0]) - float(f(xx)[0])) <= half
     return hits / reps
 
@@ -153,10 +153,10 @@ def test_gradients_flow_through_the_trend_predictive(small):
     gp = _gp(X, Z, "linear")
     x0 = jnp.asarray(X[0] + 0.05)
 
-    # s2 is a cancellation, so its finite difference is the noisy side of the comparison
-    # and sets the tolerance; the step is large for the same reason
+    # the variance is a cancellation, so its finite difference is the noisy side of the
+    # comparison and sets the tolerance; the step is large for the same reason
     step = 1e-4
-    for field, rtol in (("mean", 1e-6), ("s2", 1e-3)):
+    for field, rtol in (("mean", 1e-6), ("variance", 1e-3)):
         f = lambda x: getattr(gp.predict(x[None]), field)[0]
         got = np.asarray(jax.grad(f)(x0))
         want = np.array(
@@ -168,16 +168,17 @@ def test_gradients_flow_through_the_trend_predictive(small):
         np.testing.assert_allclose(got, want, rtol=rtol, atol=1e-9)
 
 
-def test_local_scheme_accepts_a_trend(medium):
+def test_the_local_model_accepts_a_trend(medium):
     """`trend` is static config, so it has to reach the compiled core intact."""
     X, Z = medium
     XX = np.random.default_rng(8).random((5, X.shape[1]))
-    zero = lagp.agp(X, Z, XX, start=6, end=20, batch=None)
+    model = lagp.LocalGP(init=6, neighbors=20)
+    zero = model.fit(X, Z)(XX, batch=None)
     for trend, p in (("constant", 1), ("linear", X.shape[1] + 1)):
-        out = lagp.agp(X, Z, XX, start=6, end=20, trend=trend, batch=None)
-        np.testing.assert_array_equal(np.asarray(out.df), 20 - p)
+        out = model.replace(trend=trend).fit(X, Z)(XX, batch=None)
+        np.testing.assert_array_equal(np.asarray(out.dof), 20 - p)
         assert np.all(np.isfinite(np.asarray(out.mean)))
-    np.testing.assert_array_equal(np.asarray(zero.df), 20)
+    np.testing.assert_array_equal(np.asarray(zero.dof), 20)
 
 
 def test_unknown_trend_is_rejected(small):

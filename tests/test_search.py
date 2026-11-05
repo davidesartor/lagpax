@@ -22,11 +22,23 @@ from vlse.optim import minimise
 START, END = 6, 30
 
 
+def _local(X, Z, Xref, **settings):
+    """One local GP at Xref (laGPsep's job), with the shared design sizes."""
+    return lagp.LocalGP(init=START, neighbors=END, **settings).fit(X, Z).local(Xref)
+
+
+def _predict(X, Z, XX, batch=256, **settings):
+    """One local GP per row of XX (aGPsep's job)."""
+    return lagp.LocalGP(init=START, neighbors=END, **settings).fit(X, Z)(
+        XX, batch=batch
+    )
+
+
 def _state(X, Z, Xref, ndesign=11):
     """A greedy loop frozen mid-flight: a small GP, and the rest as candidates."""
-    prior = lagp.Prior.from_design(X, Z)
-    d0 = np.broadcast_to(np.asarray(prior.d.start, float), (X.shape[1],))
-    g0 = float(prior.g.start)
+    prior = lagp.Prior.from_data(X, Z)
+    d0 = np.broadcast_to(np.asarray(prior.theta.init, float), (X.shape[1],))
+    g0 = float(prior.nugget.init)
     order = np.argsort(np.sum(np.square(X - Xref), axis=-1))
     gp = lagp.GP(X[order[:ndesign]], Z[order[:ndesign]], d0, g0)
     Xcand = jnp.asarray(X[order[ndesign:]])
@@ -112,7 +124,7 @@ def test_alcoptgpsep_optima_are_stationary_for_our_gradient(R, medium):
             "gpi <- newGPsep(Xd, Zd, d=dd, g=gg, dK=TRUE);"
             " opt <- alcoptGPsep(gpi, Xref, Xstart, rect[1,], rect[2,])",
             Xd=np.asarray(gp.X),
-            Zd=np.asarray(gp.Z),
+            Zd=np.asarray(gp.y),
             dd=d0,
             gg=np.array([g0]),
             Xref=Xref,
@@ -141,8 +153,8 @@ def test_alcoptgpsep_optima_are_stationary_for_our_gradient(R, medium):
         assert float(projected(res.x)) < 0.1 * float(projected(jnp.asarray(want)))
 
 
-def _s2_of(X, Z, idx, Xref, d0, g0):
-    return float(lagp.GP(X[idx], Z[idx], d0, g0).predict(Xref).s2[0])
+def _var_of(X, Z, idx, Xref, d0, g0):
+    return float(lagp.GP(X[idx], Z[idx], d0, g0).predict(Xref).variance[0])
 
 
 @pytest.mark.parametrize("search,method", [("ray", "alcray"), ("continuous", "alcopt")])
@@ -154,9 +166,9 @@ def test_search_designs_are_competitive_with_lagp(R, medium, search, method):
     that the design we end up with is as good as theirs at the thing ALC measures.
     """
     X, Z = medium
-    prior = lagp.Prior.from_design(X, Z)
-    d0 = np.broadcast_to(np.asarray(prior.d.start, float), (X.shape[1],))
-    g0 = float(prior.g.start)
+    prior = lagp.Prior.from_data(X, Z)
+    d0 = np.broadcast_to(np.asarray(prior.theta.init, float), (X.shape[1],))
+    g0 = float(prior.nugget.init)
 
     ratios = []
     for xref in np.random.default_rng(7).random((6, X.shape[1])):
@@ -175,8 +187,10 @@ def test_search_designs_are_competitive_with_lagp(R, medium, search, method):
             .astype(int)
             - 1
         )
-        ours = np.asarray(lagp.lagp(X, Z, Xref, start=START, end=END, search=search).Xi)
-        ratios.append(_s2_of(X, Z, ours, Xref, d0, g0) / _s2_of(X, Z, Xi, Xref, d0, g0))
+        ours = np.asarray(_local(X, Z, Xref, search=search).neighbors)
+        ratios.append(
+            _var_of(X, Z, ours, Xref, d0, g0) / _var_of(X, Z, Xi, Xref, d0, g0)
+        )
 
     assert float(np.median(ratios)) <= 1.5
 
@@ -188,11 +202,10 @@ def test_search_accuracy_tracks_exhaustive(medium):
     truth = np.sin(4 * XX[:, 0]) + np.cos(3 * XX[:, 1:3].sum(-1)) + 0.1 * XX.sum(-1)
     rmse = lambda p: float(np.sqrt(np.mean((np.asarray(p.mean) - truth) ** 2)))
 
-    opts = dict(start=START, end=END, batch=8)
-    nearest = rmse(lagp.agp(X, Z, XX, criterion="nn", **opts))
-    full = rmse(lagp.agp(X, Z, XX, **opts))
+    nearest = rmse(_predict(X, Z, XX, batch=8, criterion="nn"))
+    full = rmse(_predict(X, Z, XX, batch=8))
     for search in ("ray", "continuous"):
-        got = rmse(lagp.agp(X, Z, XX, search=search, **opts))
+        got = rmse(_predict(X, Z, XX, batch=8, search=search))
         assert got <= 1.5 * full
         assert got <= nearest
 
@@ -201,9 +214,9 @@ def test_exhaustive_stays_the_default(medium):
     """Every divergent option must leave the laGP-equivalent configuration untouched."""
     X, Z = medium
     Xref = X[:1] + 0.01
-    a = lagp.lagp(X, Z, Xref, start=START, end=END)
-    b = lagp.lagp(X, Z, Xref, start=START, end=END, search="exhaustive")
-    np.testing.assert_array_equal(np.asarray(a.Xi), np.asarray(b.Xi))
+    a = _local(X, Z, Xref)
+    b = _local(X, Z, Xref, search="exhaustive")
+    np.testing.assert_array_equal(np.asarray(a.neighbors), np.asarray(b.neighbors))
     np.testing.assert_array_equal(np.asarray(a.mean), np.asarray(b.mean))
 
 
@@ -212,9 +225,9 @@ def test_search_is_batch_invariant(medium, search):
     """Both searches have to survive `lax.map`, which is where fixed shapes get tested."""
     X, Z = medium
     XX = X[:8] + 0.015
-    a = lagp.agp(X, Z, XX, start=START, end=END, search=search, batch=2)
-    b = lagp.agp(X, Z, XX, start=START, end=END, search=search, batch=None)
-    np.testing.assert_array_equal(np.asarray(a.Xi), np.asarray(b.Xi))
+    a = _predict(X, Z, XX, batch=2, search=search)
+    b = _predict(X, Z, XX, batch=None, search=search)
+    np.testing.assert_array_equal(np.asarray(a.neighbors), np.asarray(b.neighbors))
     np.testing.assert_allclose(np.asarray(a.mean), np.asarray(b.mean), rtol=1e-9)
 
 
@@ -237,23 +250,15 @@ def test_ray_end_stays_inside_the_box():
     assert bool(jnp.all(on_face < 1e-9))
 
 
-def test_unknown_search_is_rejected(medium):
-    X, Z = medium
+def test_unknown_search_is_rejected():
     with pytest.raises(ValueError):
-        lagp.lagp(X, Z, X[:1], start=START, end=END, search="teleport")
+        lagp.LocalGP(search="teleport")
 
 
 def test_a_search_is_configured_by_its_settings(medium):
     """`criterion x search` is a grid: configuring a search must not need a new name."""
     X, Z = medium
     Xref = X[:1] + 0.01
-    out = lagp.lagp(
-        X,
-        Z,
-        Xref,
-        start=START,
-        end=END,
-        search=lagp.Ray(numrays=8, iters=20),
-    )
-    assert np.asarray(out.Xi).shape == (END,)
+    out = _local(X, Z, Xref, search=lagp.Ray(numrays=8, iters=20))
+    assert np.asarray(out.neighbors).shape == (END,)
     assert np.isfinite(float(out.mean[0]))

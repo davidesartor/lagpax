@@ -22,8 +22,8 @@ import pytest
 import vlse
 
 import lagpax as lagp
-from lagpax.mle import jmle
-from lagpax.prior import Prior, darg, garg
+from lagpax.fit import fit_both
+from lagpax.prior import Param, Prior, darg, garg
 
 SURFACES = {
     "Branin": lambda: vlse.Branin(normalized=True),
@@ -56,17 +56,23 @@ def _sample(f, n: int, seed: int):
 
 def _llik(X, Z, d, g):
     gp = lagp.GP(jnp.asarray(X), jnp.asarray(Z), jnp.asarray(d), float(g))
-    return float(gp.llik(Prior(d=lagp.Range(ab=DAB), g=lagp.Range(ab=GAB))))
+    return float(
+        gp.log_likelihood(Prior(theta=Param(gamma=DAB), nugget=Param(gamma=GAB)))
+    )
 
 
 @pytest.mark.parametrize("name", list(SURFACES))
-def test_jmle_on_test_functions(R, name):
+def test_joint_fit_on_test_functions(R, name):
     X, Z, _ = _sample(SURFACES[name](), n=150, seed=1)
     m = X.shape[1]
     d0, g0 = np.full(m, 0.5), 1e-3
 
     gp = lagp.GP(jnp.asarray(X), jnp.asarray(Z), jnp.asarray(d0), g0)
-    _, ours = jmle(gp, DRANGE, GRANGE, DAB, GAB)
+    prior = Prior(
+        theta=Param(lower=DRANGE[0], upper=DRANGE[1], gamma=DAB, learn=True),
+        nugget=Param(lower=GRANGE[0], upper=GRANGE[1], gamma=GAB, learn=True),
+    )
+    _, ours = fit_both(gp, prior)
     want = np.asarray(
         R(
             "gpi <- newGPsep(X, Z, d=d, g=g, dK=TRUE); "
@@ -84,23 +90,24 @@ def test_jmle_on_test_functions(R, name):
     ).ravel()
 
     theirs = _llik(X, Z, want[:m], want[m])
-    assert _llik(X, Z, ours.d, ours.g) >= theirs - 1e-5 * max(1.0, abs(theirs))
+    assert _llik(X, Z, ours.theta, ours.nugget) >= theirs - 1e-5 * max(1.0, abs(theirs))
     if name in UNIMODAL_FIT:
-        np.testing.assert_allclose(np.asarray(ours.d), want[:m], rtol=1e-3)
-        assert float(ours.g) == pytest.approx(want[m], rel=1e-3)
+        np.testing.assert_allclose(np.asarray(ours.theta), want[:m], rtol=1e-3)
+        assert float(ours.nugget) == pytest.approx(want[m], rel=1e-3)
 
 
 @pytest.mark.parametrize("criterion", ["nn", "alc"])
 @pytest.mark.parametrize("name", list(SURFACES))
-def test_agp_on_test_functions(R, name, criterion):
+def test_local_model_on_test_functions(R, name, criterion):
     X, Z, truth = _sample(SURFACES[name](), n=800, seed=2)
     XX = np.random.default_rng(3).random((40, X.shape[1]))
 
     # both sides get the same prior; under n=1000 darg does not subsample, but sharing it
     # keeps the comparison about the port and not about the prior
     d = darg(None, X)
-    prior = Prior(d=d, g=garg(1 / 10000, Z))
-    got = lagp.agp(X, Z, XX, prior=prior, start=START, end=END, criterion=criterion)
+    prior = Prior(theta=d, nugget=garg(1 / 10000, Z))
+    model = lagp.LocalGP(init=START, neighbors=END, criterion=criterion)
+    got = model.fit(X, Z, prior=prior)(XX)
     R(
         f"out <- aGPsep(X, Z, XX, start={START}, end={END}, d={R.darg_list(d)}, "
         f"method='{criterion}', verb=0)",

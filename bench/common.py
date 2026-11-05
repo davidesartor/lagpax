@@ -78,12 +78,12 @@ class RlaGP:
         arg = ""
         if d is not None:
             self(
-                f"dprior <- list(start=dstart, mle={'TRUE' if d.estimate else 'FALSE'}, "
+                f"dprior <- list(start=dstart, mle={'TRUE' if d.learn else 'FALSE'}, "
                 "min=dmin, max=dmax, ab=dab)",
-                dstart=np.atleast_1d(d.start),
-                dmin=np.array([d.min]),
-                dmax=np.array([d.max]),
-                dab=np.asarray(d.ab),
+                dstart=np.atleast_1d(d.init),
+                dmin=np.array([d.lower]),
+                dmax=np.array([d.upper]),
+                dab=np.asarray(d.gamma),
             )
             arg = ", d=dprior"
         self(

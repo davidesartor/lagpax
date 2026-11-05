@@ -28,18 +28,11 @@ def run(ns, searches, out="scaling.csv") -> pd.DataFrame:
         X, Z, XX = design(n=n, nn=NN, m=M, seed=0)
         truth = ackley(XX)
         for search in searches:
+            model = lagp.LocalGP(
+                init=START, neighbors=END, search=search, candidates=n
+            )
             fn = lambda: jax.block_until_ready(
-                lagp.agp(
-                    X,
-                    Z,
-                    XX,
-                    key=jax.random.key(0),
-                    start=START,
-                    end=END,
-                    search=search,
-                    close=n,
-                    batch=NN,
-                )
+                model.fit(X, Z, key=jax.random.key(0))(XX, batch=NN)
             )
             seconds, pred = timeit(fn)
             rows.append(

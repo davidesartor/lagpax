@@ -5,10 +5,11 @@ about how the current code works; this file owns every measurement and every dec
 
 ## Status
 
-The laGP port is **complete**: audited against laGP 1.5.9's 51 namespace exports, nothing in scope is
-unported (re-run with `.libPaths("~/R/library"); print(sort(getNamespaceExports("laGP")))`).
-Box-constrained optimization is delegated to `vlse`, and parity now also covers real optimization
-benchmark surfaces. What is left before a first release is in § Next.
+The laGP port is **complete** and now lives under lagpax's own API (phase 8): the core laGP does —
+the separable GP, default priors, MAP fitting, ALC/IECI with exhaustive/ray/continuous search, and
+the local schemes — is verified against laGP 1.5.9; a few laGP features were dropped on purpose
+(below). Box-constrained optimization is delegated to `vlse`, and parity also covers real
+optimization benchmark surfaces. What is left before a first release is in § Next.
 
 | phase | | commit |
 | --- | --- | --- |
@@ -19,12 +20,16 @@ benchmark surfaces. What is left before a first release is in § Next.
 | 4 | differentiable fitting (`optim.implicit_argmin`) | `f86c421` |
 | 5 | MSPE, Fisher, block-bootstrap subsampling | `f6b4579` |
 | 6 | L-BFGS-B from `vlse.optim.minimise`; parity on vlse's SFU surfaces (`tests/test_vlse.py`) | branch `ccr-7f9aed99-rlk3k1` |
-| 7 | JAX-native API: no import side effect, explicit keys, pytree criteria/searches/emulator | branch `ccr-7f9aed99-rlk3k1` |
+| 7 | JAX-native API: no import side effect, explicit keys, pytree criteria/searches/emulator | `332e6cf` |
+| 8 | Hard redesign: lagpax's own API (`LocalGP`/`Emulator`/`Prior`/`Param`), theta-or-lengthscale priors, laGP-isms dropped | branch `ccr-7f9aed99-rlk3k1` |
 
 **Explicitly not shipping**, do not implement even if it looks easy: `aGP.parallel` (XLA decides
 parallelism), `randLine` (a visual diagnostic), `optim.auglag`/`optim.efi` (constrained blackbox
 optimization — a separate package's job), `discrep.est`/`fcalib` (computer-model calibration — a
-distinct research workflow).
+distinct research workflow). **Removed in phase 8**, also not to come back without a user asking:
+MSPE and Fisher-information criteria (rarely used, isotropic-only in laGP), `blhs` lengthscale
+bootstrapping, laGP's conv=102 refusal to optimize from the lower bound, and the raw-scale `s2`
+output.
 
 ## Rules that govern new work
 
@@ -32,7 +37,9 @@ distinct research workflow).
   against R; non-exported R functions are reachable as `laGP:::alcGPsep` etc. Anything *without* one
   gets property tests — analytic special cases, finite differences, invariances.
 - **Parity is a property of the laGP-equivalent configuration**, not of the package. Every divergent
-  flag needs a documented default that reproduces laGP and a test asserting it still does.
+  flag needs a documented default that reproduces laGP and a test asserting it still does. The API
+  does not follow laGP (phase 8), but the numbers behind the defaults do: a theta-space `Prior` from
+  `Prior.from_data`, `trend="zero"`, `criterion="alc"`, `search="exhaustive"`.
 - **Where our optimizer finds the same KKT point by a different path, assert that** — plus "our llik
   is no worse than laGP's". On multimodal likelihoods only the second half holds; say so in the test.
 - **Tolerances are not a dial.** Never loosen one to get a green run, never skip or `xfail` a parity
@@ -194,6 +201,8 @@ not taken. Keep the 1-core row; it is the only way such a node announces itself.
 - [ ] **Do not weaken lagpax's own license.** It is a derivative of laGP.
 - [ ] Re-check `README.md` on scope, the speed claim and the solver whenever a criterion, search or
       dependency changes.
+- [ ] Decide the version for the first real release now that the API has broken twice since the
+      plan was written; `0.1.0` is still unused.
 - [x] CI runs the parity suite under `LAGPAX_STRICT=1`. Green on `8d8e4b4` and `3a180d3`.
 - [x] CI pins laGP to 1.5-9 from the CRAN archive and fails on any other version; it used to take
       CRAN's newest (1.5-10) and fall back to the archive only if that failed.
@@ -206,6 +215,39 @@ not taken. Keep the 1-core row; it is the only way such a node announces itself.
 - [ ] Re-measure the fit intercept (the 1.06s) with vlse.
 - [ ] Multi-seed reruns: every GPU number is single-seed.
 - [ ] A first submission of `bench/cpu.sbatch`, committed but never run.
+
+### Phase 8: the hard redesign
+
+Equivalent core functionality, lagpax's own API. Names follow what things are, not what laGP's C
+entry points were called:
+
+| laGP-shaped (phase 7) | phase 8 |
+| --- | --- |
+| `Local(start, end, close).condition(X, Z)` | `LocalGP(init, neighbors, candidates).fit(X, y)` |
+| `Conditioned.predict(XX)`, `agp`, `lagp` | `Emulator.__call__(Xnew)`, `Emulator.local(Xref)`; no free functions |
+| `Prediction(mean, s2, df, llik, Xi, fit)` + `.var` | `Prediction(mean, variance, dof, log_likelihood, covariance, neighbors, fit)` |
+| `Fit(d, g, its, conv)` | `FitInfo(theta, nugget, iterations, converged)` + `.lengthscale` |
+| `Prior(d=Range(start, min, max, ab, estimate), g=...)` | `Prior(theta= or lengthscale=Param(init, lower, upper, gamma, learn), nugget=...)` |
+| `GP(X, Z, d, g)`, `.llik`, `.update`, `.at`, `predict(lite=)` | `GP(X, y, theta, nugget)`, `.log_likelihood`, `.append`, `.replace`, `predict(full_cov=)` |
+| `covar(d, X1, X2)`, `distance` | `correlation(X1, X2, theta)`, `sqdist` |
+| `mle_d`, `mle_g`, `jmle` | `fit_kernel`, `fit_nugget`, `fit_both` (in `lagpax.fit`) |
+
+- **A prior on the conventional lengthscale is the one new capability.** `Prior(lengthscale=...)`
+  puts the bounds and Gamma prior on `l = sqrt(theta / 2)`; the solve runs in `l`. With no Gamma
+  prior both spaces reach the same optimum (`test_fit` checks it to 2e-3); with one they are
+  different MAP estimates by construction. `from_data(space="lengthscale")` maps laGP's defaults to
+  `l` and recenters the Gamma(1.5, b) prior so 95% of its mass lies below the upper bound in `l`.
+- **The theta-space path is numerically the old one.** Against a baseline written by the phase-7
+  code in the same container, every surviving snapshot value is bit-identical except the aGP
+  variances, which move by one ulp (2e-19 absolute): the variance is now formed inside the jitted
+  `_core`, where XLA may fuse `scale * dof / (dof - 2)`, instead of as an eager property afterwards.
+- **A snapshot does not travel between machines.** The phase-7 code itself differs from its own
+  baseline by up to 1e-11 after a container restart (different core count, different XLA CPU
+  reduction order). Compare against a baseline written by the old code in the current environment.
+- **Removing the conv=102 reset changed no tested behaviour.** laGP jumps to `0.9*min + 0.1*max`
+  when the start sits on the lower bound; lagpax optimizes from there and reaches the interior
+  start's optimum (`test_a_start_on_the_bound_is_simply_optimized`). darg's starts are interior
+  anyway.
 
 ### Phase 7: what the JAX-native redesign decided
 

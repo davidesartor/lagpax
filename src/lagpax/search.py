@@ -25,7 +25,7 @@ import jax
 import jax.numpy as jnp
 from vlse.optim import minimise
 
-from .covar import distance
+from .kernel import sqdist
 from ._config import pytree_config, static
 from .criteria import Criterion
 from .gp import GP
@@ -52,7 +52,7 @@ def _nearest(
     taken: Bool[Array, "ncand"],
 ) -> Int[Array, ""]:
     """Snap a point in the input space to the closest candidate still available."""
-    dst = distance(Xstar, Xcand)[0]
+    dst = sqdist(Xstar, Xcand)[0]
     return jnp.argmin(jnp.where(taken, jnp.inf, dst))
 
 
@@ -86,7 +86,7 @@ def _exhaustive(
 ) -> Int[Array, ""]:
     """Score every candidate and take the best, matching laGP's default search.
 
-    `Xcand` is the same array at every greedy step, so `covar(gp.d, Xcand, gp.X)` gains one
+    `Xcand` is the same array at every greedy step, so `correlation(Xcand, gp.X, gp.theta)` gains one
     column per step and is otherwise unchanged; `kx` is that matrix carried forward. The
     ray and continuous searches score points that are not candidates, so no cache applies.
     """

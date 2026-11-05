@@ -1,50 +1,46 @@
-"""JAX port of the laGP R package (separable / GPsep family).
+"""Local approximate Gaussian processes in JAX.
 
-Computation runs in the dtype of the input. laGP is float64 throughout, so parity with it
-needs `jax.config.update("jax_enable_x64", True)` *before* the data is created -- lagpax
-does not flip that switch for you. It follows laGP's parameterization: the correlation is
-`exp(-sum_k (x1_k - x2_k)^2 / d_k)` with nugget `g` on the diagonal, the process is
-zero-mean unless a trend is asked for, and the scale is profiled out (`phi = Z' Ki Z`).
+    model = lagpax.LocalGP(neighbors=50, criterion="alc")
+    emulator = model.fit(X, y, key=jax.random.key(0))
+    prediction = emulator(Xnew)            # Prediction(mean, variance, dof, ...)
 
-The public surface is deliberately small. Everything else stays importable from its own
-module -- `lagpax.optim.implicit_argmin`, `lagpax.covar.dcovar`, `lagpax.mle.jmle`, `lagpax.search.ray`.
+Each prediction location gets its own small GP on a design grown greedily from the training
+set, with its own fitted hyperparameters -- which is what makes the model nonstationary. The
+kernel is `exp(-sum (x - x')^2 / theta)` plus a nugget; the numerics are verified against the
+laGP R package, which this began as a port of.
+
+Computation runs in the dtype of the input; nothing here changes global JAX state. Results
+matching laGP's need `jax.config.update("jax_enable_x64", True)` before the data is created.
 """
 
-from .blhs import bootstrap
-from .covar import covar, distance
-from .criteria import ALC, IECI, MSPE, NN, Criterion, Custom, Fisher, alc, fisher, nn
+from .criteria import ALC, IECI, NN, Criterion, Custom, alc, nn
+from .fit import FitInfo, fit
 from .gp import GP, Prediction
-from .local import Conditioned, Local, agp, lagp
-from .mle import Fit, fit
-from .prior import Prior, Range
+from .kernel import correlation, sqdist
+from .model import Emulator, LocalGP
+from .prior import Param, Prior
 from .search import Continuous, Exhaustive, Ray, Search
 
 __all__ = [
     "ALC",
-    "Conditioned",
     "Continuous",
     "Criterion",
     "Custom",
+    "Emulator",
     "Exhaustive",
-    "Fisher",
-    "Fit",
+    "FitInfo",
     "GP",
     "IECI",
-    "Local",
-    "MSPE",
+    "LocalGP",
     "NN",
+    "Param",
     "Prediction",
     "Prior",
-    "Range",
     "Ray",
     "Search",
-    "agp",
     "alc",
-    "bootstrap",
-    "covar",
-    "distance",
-    "fisher",
+    "correlation",
     "fit",
-    "lagp",
     "nn",
+    "sqdist",
 ]

@@ -50,11 +50,11 @@ class RlaGP:
         return float(np.asarray(self(script, **data)).ravel()[0])
 
     def darg_list(self, d) -> str:
-        """R expression for a darg/garg-shaped list, so both sides get identical settings."""
-        start = ",".join(repr(float(v)) for v in np.atleast_1d(d.start))
+        """R expression for a darg/garg list from a Param, so both sides get identical settings."""
+        start = ",".join(repr(float(v)) for v in np.atleast_1d(d.init))
         return (
-            f"list(start=c({start}), min={d.min!r}, max={d.max!r}, "
-            f"mle={'TRUE' if d.estimate else 'FALSE'}, ab=c({d.ab[0]!r},{d.ab[1]!r}))"
+            f"list(start=c({start}), min={d.lower!r}, max={d.upper!r}, "
+            f"mle={'TRUE' if d.learn else 'FALSE'}, ab=c({d.gamma[0]!r},{d.gamma[1]!r}))"
         )
 
 
