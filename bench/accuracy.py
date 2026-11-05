@@ -1,5 +1,6 @@
 """Do the JAX port and laGP predict the same thing? -> bench/accuracy.csv"""
 
+import jax
 import numpy as np
 import pandas as pd
 
@@ -29,7 +30,7 @@ def run() -> pd.DataFrame:
             for seed in SEEDS:
                 X, Z, XX = design(seed=seed, **case)
                 # both sides get the same prior; darg's own subsample is RNG-dependent
-                d = darg(None, X)
+                d = darg(None, X, key=jax.random.key(seed))
                 prior = Prior(d=d, g=garg(1 / 10000, Z))
                 ours = lagp.agp(
                     X, Z, XX, prior=prior, start=START, end=END, criterion=method

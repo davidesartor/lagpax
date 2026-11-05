@@ -30,7 +30,15 @@ def run(ns, searches, out="scaling.csv") -> pd.DataFrame:
         for search in searches:
             fn = lambda: jax.block_until_ready(
                 lagp.agp(
-                    X, Z, XX, start=START, end=END, search=search, close=n, batch=NN
+                    X,
+                    Z,
+                    XX,
+                    key=jax.random.key(0),
+                    start=START,
+                    end=END,
+                    search=search,
+                    close=n,
+                    batch=NN,
                 )
             )
             seconds, pred = timeit(fn)

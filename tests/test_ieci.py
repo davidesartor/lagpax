@@ -44,7 +44,7 @@ def test_ieci_matches_iecigpsep(R, request, fixture, rtol, nugget):
             Xref=np.asarray(Xref),
         )
     ).ravel()
-    got = np.asarray(lagp.ieci(fmin=fmin, nugget=nugget)(gp, Xcand, Xref))
+    got = np.asarray(lagp.IECI(fmin=fmin, nugget=nugget)(gp, Xcand, Xref))
     np.testing.assert_allclose(got, want, rtol=rtol)
 
 
@@ -63,7 +63,7 @@ def test_ieci_weights_match_lagp(R, small):
             w=w,
         )
     ).ravel()
-    got = np.asarray(lagp.ieci(fmin=fmin, w=jnp.asarray(w))(gp, Xcand, Xref))
+    got = np.asarray(lagp.IECI(fmin=fmin, w=jnp.asarray(w))(gp, Xcand, Xref))
     np.testing.assert_allclose(got, want, rtol=1e-10)
 
 
@@ -78,7 +78,7 @@ def test_ieci_is_minimized_and_alc_is_not():
     gp = lagp.GP(X, Z, np.array([0.1]), 1e-6)
     Xcand = jnp.asarray(np.linspace(0.02, 0.98, 49)[:, None])
 
-    scores = lagp.ieci(fmin=float(Z.min()))(gp, Xcand, Xcand)
+    scores = lagp.IECI(fmin=float(Z.min()))(gp, Xcand, Xcand)
     best = float(Xcand[jnp.argmin(scores), 0])
     assert abs(best - 0.2) < 0.05
 
@@ -88,7 +88,7 @@ def test_ieci_is_minimized_and_alc_is_not():
 
 def test_ieci_declares_its_direction():
     """The greedy loop reads `minimize` off the criterion instead of hardcoding argmax."""
-    assert lagp.ieci(fmin=0.0).minimize is True
+    assert lagp.IECI(fmin=0.0).minimize is True
     assert getattr(lagp.alc, "minimize", False) is False
 
 
@@ -96,7 +96,7 @@ def test_ieci_gradient_matches_finite_differences(small):
     """Differentiability is the reason a criterion needs no hand-written derivative."""
     X, Z = small
     gp, Xcand, Xref, fmin = _split(X, Z)
-    criterion = lagp.ieci(fmin=fmin)
+    criterion = lagp.IECI(fmin=fmin)
     scalar = lambda x: criterion(gp, x[None], Xref)[0]
 
     x0 = Xcand[0]
@@ -116,7 +116,7 @@ def test_agp_runs_with_ieci(medium):
     X, Z = medium
     XX = np.random.default_rng(4).random((6, X.shape[1]))
     fmin = float(Z.min())
-    out = lagp.agp(X, Z, XX, start=6, end=20, criterion=lagp.ieci(fmin=fmin), batch=3)
+    out = lagp.agp(X, Z, XX, start=6, end=20, criterion=lagp.IECI(fmin=fmin), batch=3)
     assert np.all(np.isfinite(np.asarray(out.mean)))
     assert np.asarray(out.Xi).shape == (6, 20)
 
@@ -128,7 +128,7 @@ def test_agp_runs_with_ieci(medium):
 
     # with several reference locations the monotone tie breaks and the designs diverge
     Xref = XX[:3]
-    ours = lagp.lagp(X, Z, Xref, start=6, end=20, criterion=lagp.ieci(fmin=fmin)).Xi
+    ours = lagp.lagp(X, Z, Xref, start=6, end=20, criterion=lagp.IECI(fmin=fmin)).Xi
     theirs = lagp.lagp(X, Z, Xref, start=6, end=20).Xi
     assert not np.array_equal(np.asarray(ours), np.asarray(theirs))
 

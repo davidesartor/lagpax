@@ -19,6 +19,7 @@ benchmark surfaces. What is left before a first release is in § Next.
 | 4 | differentiable fitting (`optim.implicit_argmin`) | `f86c421` |
 | 5 | MSPE, Fisher, block-bootstrap subsampling | `f6b4579` |
 | 6 | L-BFGS-B from `vlse.optim.minimise`; parity on vlse's SFU surfaces (`tests/test_vlse.py`) | branch `ccr-7f9aed99-rlk3k1` |
+| 7 | JAX-native API: no import side effect, explicit keys, pytree criteria/searches/emulator | branch `ccr-7f9aed99-rlk3k1` |
 
 **Explicitly not shipping**, do not implement even if it looks easy: `aGP.parallel` (XLA decides
 parallelism), `randLine` (a visual diagnostic), `optim.auglag`/`optim.efi` (constrained blackbox
@@ -97,8 +98,10 @@ directly with R's stopping rule. What moved, each measured against the old solve
   solver's value bit-identically and avoids `nondiff_argnums` over a closure holding tracers.
 - **`refine` keeps a Python loop.** Passes may name different criteria, which trace to different
   functions, so `lax.scan` is impossible. It still jits and differentiates as one graph.
-- **Configurable criteria are factories, never `functools.partial`** — a partial does not forward
-  `minimize`, so it would silently maximize a criterion meant to be minimized.
+- **Criteria and searches are pytree dataclasses (phase 7), not factories or partials.** The old
+  factories existed because `functools.partial` dropped the `minimize` attribute, which searches
+  read with `getattr(..., False)` and would have silently maximized a minimized criterion. Class
+  attributes on a `Criterion` base remove the failure mode instead of documenting it.
 - **The parity targets for MSPE/Fisher are isotropic** (`newGP`); a separable GP with equal `d_k` is
   that GP exactly.
 - **laGP contradicts itself and the port copies it** (`efiGP`'s `sq(dmu)/s2` vs `mspeGP`'s
@@ -204,17 +207,32 @@ not taken. Keep the 1-core row; it is the only way such a node announces itself.
 - [ ] Multi-seed reruns: every GPU number is single-seed.
 - [ ] A first submission of `bench/cpu.sbatch`, committed but never run.
 
-### Candidate phase 7: a JAX-native API (proposed, not decided)
+### Phase 7: what the JAX-native redesign decided
 
-The core is already pytrees and pure functions after `condition`. The boundaries are not:
+Shipped in four stages, each checked against the strict parity suite and the 124-array snapshot.
+Every stage was **bit-identical** under float64; nothing numerical moved.
 
-| today | proposed |
+| was | now |
 | --- | --- |
-| `import lagpax` flips `jax_enable_x64` process-wide | compute in the input dtype; warn when x64 is off |
-| `rng: np.random.Generator` in `Prior.from_design`, `bootstrap`, `agp` | explicit `key: jax.Array`; the R-exact numpy path stays for parity |
-| `emu.predict(XX, batch=)` owns the `lax.map` | expose the per-location function; the user picks `vmap`/`lax.map`/`shard_map` |
-| string criteria/searches + `_Cfg` + `getattr(..., "minimize")` | small modules with static fields (`ALC()`, `IECI(fmin=)`, `Ray()`) |
-| `Conditioned` mixes data, prior and config | a pytree state plus a hashable scheme |
+| `import lagpax` flipped `jax_enable_x64` process-wide | no global state; the input dtype rules, and float32 runs end to end |
+| `rng: np.random.Generator`, defaulting to an unseeded one | `key: jax.Array`; required exactly when the call is random |
+| string criteria/searches, `_Cfg`, `getattr(..., "minimize")`, factories, partials | `ALC()`, `IECI(fmin=)`, `Ray(numrays=)`: pytree dataclasses, static flags, numeric leaves |
+| `Conditioned` held a NamedTuple scheme passed to `_core` via a hand-built static `_Cfg` | `Local`, `Range`, `Conditioned` are pytrees; `_core(emu, Xref, d0, lite=)` |
+| `predict` owned the batching | `local` is the primitive; `predict` is `lax.map` over it, `vmap` works too |
 
-Breaking changes are cheap only until `0.1.0` ships. Parity tests and the snapshot must hold through
-it value-for-value.
+Decisions worth keeping:
+
+- **Strings stay as sugar.** `Local(criterion="alc", search="ray")` normalizes to objects on
+  construction, so nothing downstream sees a string. Removing them would have bought purity and
+  cost every laGP user the vocabulary they already have.
+- **No equinox.** `jax.tree_util.register_dataclass` with a `static()` field marker covers it.
+- **A missing key is an error only when a draw happens.** darg on <=1000 rows is deterministic and
+  takes no key; making the key mandatory everywhere would have been ceremony.
+- **float32 needs R's absolute `ftol`, not a rescaled one.** `factr * eps(float32)` is ~1.2, so
+  every fit stopped after one iteration and predictions were off by O(1); `factr * eps(float64)`
+  lets vlse stop on stalled progress instead, and float32 aGP then lands within 2e-3 of the truth.
+  `s2` can come out negative in float32 at `g=1e-4` (the `1 + g - k'Ki k` cancellation) — that is
+  float32, not a bug, and the float32 test does not promise its sign.
+- **A latent bug the redesign exposed:** `float(jnp.sqrt(eps))` in `bracketed_newton` is a tracer
+  under an enclosing `jit`, so the joint MLE failed inside `_core` while every eager test and the
+  snapshot passed. Only the strict suite caught it. Host-side constants now use `math`.

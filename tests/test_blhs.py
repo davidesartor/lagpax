@@ -1,5 +1,6 @@
 """Block Latin hypercube subsampling against laGP's blhs / blhs.loop."""
 
+import jax
 import numpy as np
 import pytest
 
@@ -45,7 +46,7 @@ def test_blocks_matches_r_on_a_wider_design(R, medium):
 
 
 def test_latin_is_a_permutation_per_dimension():
-    L = latin(5, 3, np.random.default_rng(0))
+    L = latin(jax.random.key(0), 5, 3)
     assert L.shape == (5, 3)
     for col in L.T:
         np.testing.assert_array_equal(np.sort(col), np.arange(1, 6))
@@ -53,7 +54,7 @@ def test_latin_is_a_permutation_per_dimension():
 
 def test_subsample_keeps_rows_intact(small):
     X, Z = small
-    Xs, Zs = subsample(X, Z, m=3, rng=np.random.default_rng(3))
+    Xs, Zs = subsample(X, Z, m=3, key=jax.random.key(3))
     assert 0 < len(Xs) < len(X) and Xs.shape[1] == X.shape[1]
     for x, z in zip(Xs, Zs):
         i = np.flatnonzero((X == x).all(-1))[0]
@@ -63,11 +64,11 @@ def test_subsample_keeps_rows_intact(small):
 def test_subsample_rejects_shapes_blhs_rejects(small):
     X, Z = small
     with pytest.raises(ValueError, match="at least 2 input"):
-        subsample(X[:, :1], Z, m=3)
+        subsample(X[:, :1], Z, m=3, key=jax.random.key(0))
     with pytest.raises(ValueError, match="m must be positive"):
-        subsample(X, Z, m=0)
+        subsample(X, Z, m=0, key=jax.random.key(0))
     with pytest.raises(ValueError, match=r"m <= n"):
-        subsample(X, Z, m=20)
+        subsample(X, Z, m=20, key=jax.random.key(0))
 
 
 def test_bootstrap_median_matches_r(R, medium):
@@ -80,11 +81,12 @@ def test_bootstrap_median_matches_r(R, medium):
     """
     X, Z = medium
     m, K = 3, 5
-    prior = lagp.Prior.from_design(X, Z, rng=np.random.default_rng(0))
+    prior = lagp.Prior.from_design(X, Z)
     ab = np.asarray(prior.d.ab)
 
-    rng = np.random.default_rng(9)
-    draws = [subsample(X, Z, m, rng=rng) for _ in range(K)]
+    # bootstrap's own key schedule: one split for a prior it may need, then one key per draw
+    key, _ = jax.random.split(jax.random.key(9))
+    draws = [subsample(X, Z, m, key=k) for k in jax.random.split(key, K)]
     theirs = [
         np.asarray(
             R(
@@ -124,7 +126,7 @@ def test_bootstrap_median_matches_r(R, medium):
             >= llik_d(gp, theirs_d, dab=tuple(ab)) - 1e-6
         )
 
-    got = bootstrap(X, Z, m, K=K, prior=prior, g=G, rng=np.random.default_rng(9))
+    got = bootstrap(X, Z, m, K=K, prior=prior, g=G, key=jax.random.key(9))
     np.testing.assert_array_equal(np.asarray(got.d.start), np.median(ours, axis=0))
     np.testing.assert_allclose(
         np.asarray(got.d.start), np.median(theirs, axis=0), rtol=1e-3
@@ -133,8 +135,8 @@ def test_bootstrap_median_matches_r(R, medium):
 
 def test_bootstrap_returns_a_usable_prior(medium):
     X, Z = medium
-    prior = lagp.Prior.from_design(X, Z, rng=np.random.default_rng(0))
-    boot = lagp.bootstrap(X, Z, m=3, K=3, prior=prior, rng=np.random.default_rng(1))
+    prior = lagp.Prior.from_design(X, Z)
+    boot = lagp.bootstrap(X, Z, m=3, K=3, prior=prior, key=jax.random.key(1))
 
     start = np.asarray(boot.d.start)
     assert start.shape == (X.shape[1],)
@@ -146,10 +148,10 @@ def test_bootstrap_returns_a_usable_prior(medium):
     assert np.all(np.isfinite(np.asarray(out.mean)))
 
 
-def test_bootstrap_is_deterministic_given_a_seed(medium):
+def test_bootstrap_is_deterministic_given_a_key(medium):
     X, Z = medium
-    prior = lagp.Prior.from_design(X, Z, rng=np.random.default_rng(0))
+    prior = lagp.Prior.from_design(X, Z)
     kw = dict(m=3, K=3, prior=prior)
-    a = lagp.bootstrap(X, Z, rng=np.random.default_rng(4), **kw)
-    b = lagp.bootstrap(X, Z, rng=np.random.default_rng(4), **kw)
+    a = lagp.bootstrap(X, Z, key=jax.random.key(4), **kw)
+    b = lagp.bootstrap(X, Z, key=jax.random.key(4), **kw)
     np.testing.assert_array_equal(np.asarray(a.d.start), np.asarray(b.d.start))

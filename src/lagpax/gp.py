@@ -9,6 +9,7 @@ import jax.scipy as jsp
 
 from .covar import covar, covar_symm
 
+# laGP's constant, R's sqrt(.Machine$double.eps): a parity value, not the working precision
 SDEPS = float(jnp.sqrt(jnp.finfo(jnp.float64).eps))
 
 Trend = Literal["zero", "constant", "linear"]
@@ -163,9 +164,19 @@ def _new(
 GP.__new__ = staticmethod(_new)
 
 
+def _floating(x) -> Array:
+    """`x` as an array in its own floating dtype; integer input takes JAX's default float.
+
+    Nothing here forces float64: under `jax_enable_x64` numpy input stays float64, which
+    is what laGP parity needs, and without it the whole pipeline runs in float32.
+    """
+    x = jnp.asarray(x)
+    return x if jnp.issubdtype(x.dtype, jnp.floating) else x.astype(float)
+
+
 def _build(X, Z, d, g, mask, F, trend) -> GP:
     """Factorize K, then profile out the trend coefficients and the scale."""
-    X = jnp.asarray(X, jnp.float64)
+    X = _floating(X)
     Z = jnp.asarray(Z, X.dtype)
     n, m = X.shape
     d = jnp.broadcast_to(jnp.atleast_1d(jnp.asarray(d, X.dtype)), (m,))

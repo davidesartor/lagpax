@@ -9,6 +9,11 @@ no value: the pre-rename snapshot was written by a script emitting these same ke
 import sys
 from pathlib import Path
 
+# laGP is float64 throughout; lagpax follows the input dtype, so parity needs x64 on first
+import jax
+
+jax.config.update("jax_enable_x64", True)
+
 import numpy as np
 
 import lagpax as lagp
@@ -86,16 +91,15 @@ def collect() -> dict[str, np.ndarray]:
         XX = X[:8] + 0.015
         emu = lagp.Local(start=START, end=END).condition(X, Z)
         for crit in ("nn", "alc"):
-            a = emu.predict(XX, batch=4, criterion=crit)
+            use = emu._replace(scheme=emu.scheme.replace(criterion=crit))
+            a = use.predict(XX, batch=4)
             out[f"agp.{name}.{crit}.mean"] = np.asarray(a.mean, float)
             out[f"agp.{name}.{crit}.var"] = np.asarray(a.var, float)
             out[f"agp.{name}.{crit}.llik"] = np.asarray(a.llik, float)
             out[f"agp.{name}.{crit}.Xi"] = np.asarray(a.Xi, float)
             out[f"agp.{name}.{crit}.d"] = np.asarray(a.fit.d, float)
 
-            q = emu._replace(scheme=emu.scheme._replace(criterion=crit)).local(
-                X[:1] + 0.01
-            )
+            q = use.local(X[:1] + 0.01)
             out[f"lagp.{name}.{crit}.mean"] = np.asarray(q.mean, float)
             out[f"lagp.{name}.{crit}.s2"] = np.asarray(q.s2, float)
             out[f"lagp.{name}.{crit}.df"] = np.asarray(q.df, float)

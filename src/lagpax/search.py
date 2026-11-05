@@ -2,20 +2,23 @@
 
 `criterion x search` is a grid, not a list of methods: laGP spells the three combinations
 it ships as `alcGPsep` / `alcrayGPsep` / `alcoptGPsep`, and adding criteria multiplies the
-names. Every search here has the same signature and reads the criterion's `minimize`
-attribute for its direction, so any criterion works with any search.
+names. Every search here has the same signature and takes its direction from the
+criterion's `minimize`, so any criterion works with any search.
+
+A search is a frozen dataclass of static settings (`Ray(numrays=4)`), registered as a
+pytree with no leaves: its settings are part of the compiled program and it hashes by value.
 
 `ray` and `continuous` are the scalability searches: their cost per greedy step is set by
 `numrays` / `numstart`, not by the candidate count, which is what makes the local scheme
 usable when the candidate set is huge.
 
-Signature is `(criterion, gp, Xcand, Xref, taken, t, rect) -> index into Xcand`, where `t`
-counts greedy steps from 0 and `taken` marks the candidates already in the design. A search
-that also takes a cached `kx` carries `cached = True`; the greedy loop only maintains the
-cache for those.
+Calling one is `(criterion, gp, Xcand, Xref, taken, t, rect) -> index into Xcand`, where
+`t` counts greedy steps from 0 and `taken` marks the candidates already in the design. A
+search that also takes a cached `kx` has `cached = True`; the greedy loop only maintains
+the cache when both the search and the criterion do.
 """
 
-from typing import Callable
+from typing import Callable, ClassVar, Optional
 from jaxtyping import Array, Bool, Float, Int, Scalar
 
 import jax
@@ -23,11 +26,11 @@ import jax.numpy as jnp
 from vlse.optim import minimise
 
 from .covar import distance
+from ._config import pytree_config, static
 from .criteria import Criterion
 from .gp import GP
-from .optim import R_FTOL
+from .optim import r_ftol
 
-Search = Callable[..., Int[Array, ""]]
 
 GOLDEN = (5.0**0.5 - 1.0) / 2.0
 
@@ -71,7 +74,7 @@ def _block(
     return jnp.searchsorted(available, rank + 1, side="left")
 
 
-def exhaustive(
+def _exhaustive(
     criterion: Criterion,
     gp: GP,
     Xcand: Float[Array, "ncand m"],
@@ -87,13 +90,8 @@ def exhaustive(
     column per step and is otherwise unchanged; `kx` is that matrix carried forward. The
     ray and continuous searches score points that are not candidates, so no cache applies.
     """
-    kw = {} if kx is None or not getattr(criterion, "cached", False) else {"kx": kx}
-    return _pick(
-        criterion(gp, Xcand, Xref, **kw), taken, getattr(criterion, "minimize", False)
-    )
-
-
-exhaustive.cached = True
+    kw = {} if kx is None or not criterion.cached else {"kx": kx}
+    return _pick(criterion(gp, Xcand, Xref, **kw), taken, criterion.minimize)
 
 
 def _golden_max(
@@ -144,7 +142,7 @@ def _ray_ends(
     return Xstart + jnp.clip(s, 0.0, 1.0)[:, None] * step
 
 
-def ray(
+def _ray(
     criterion: Criterion,
     gp: GP,
     Xcand: Float[Array, "ncand m"],
@@ -169,7 +167,7 @@ def ray(
     """
     ncand, m = Xcand.shape
     numrays = min(numrays or m, ncand)
-    minimize = getattr(criterion, "minimize", False)
+    minimize = criterion.minimize
 
     # laGP's schedule: offset cycles over 1..floor(sqrt(step)), so rays keep starting
     # among the nearest few candidates while the window widens as the design grows
@@ -190,7 +188,7 @@ def ray(
     return _nearest(Xstar, Xcand, taken)
 
 
-def continuous(
+def _continuous(
     criterion: Criterion,
     gp: GP,
     Xcand: Float[Array, "ncand m"],
@@ -209,7 +207,7 @@ def continuous(
     """
     ncand = Xcand.shape[0]
     numstart = min(numstart, ncand)
-    minimize = getattr(criterion, "minimize", False)
+    minimize = criterion.minimize
 
     def objective(x):
         score = criterion(gp, x[None], Xref)[0]
@@ -224,7 +222,7 @@ def continuous(
             x0,
             (rect[0], rect[1]),
             tol=0.0,
-            ftol=R_FTOL,
+            ftol=r_ftol(x0.dtype),
             max_iterations=maxit,
         )
         return _nearest(res.x[None], Xcand, taken)
@@ -239,11 +237,87 @@ def continuous(
     return ws[best]
 
 
-def _named(search) -> Search:
-    """Resolve a search name to a function; pass callables through unchanged."""
-    if callable(search):
+class Search:
+    """Base class. Subclasses are `@pytree_config` dataclasses of static settings."""
+
+    cached: ClassVar[bool] = False
+
+    def __call__(
+        self,
+        criterion: Criterion,
+        gp: GP,
+        Xcand: Float[Array, "ncand m"],
+        Xref: Float[Array, "nref m"],
+        taken: Bool[Array, "ncand"],
+        t: Scalar,
+        rect: Float[Array, "2 m"],
+        kx: Optional[Float[Array, "ncand n"]] = None,
+    ) -> Int[Array, ""]:
+        raise NotImplementedError
+
+
+@pytree_config
+class Exhaustive(Search):
+    """Score every candidate and take the best, matching laGP's default search."""
+
+    cached: ClassVar[bool] = True
+
+    def __call__(self, criterion, gp, Xcand, Xref, taken, t, rect, kx=None):
+        return _exhaustive(criterion, gp, Xcand, Xref, taken, t, rect, kx)
+
+
+@pytree_config
+class Ray(Search):
+    """Golden-section search along rays leaving Xref, per alcrayGPsep.
+
+    `numrays=0` means one ray per input dimension, laGP's default.
+    """
+
+    numrays: int = static(default=0)
+    iters: int = static(default=30)
+
+    def __call__(self, criterion, gp, Xcand, Xref, taken, t, rect, kx=None):
+        return _ray(
+            criterion,
+            gp,
+            Xcand,
+            Xref,
+            taken,
+            t,
+            rect,
+            numrays=self.numrays,
+            iters=self.iters,
+        )
+
+
+@pytree_config
+class Continuous(Search):
+    """L-BFGS-B over the box from `numstart` starts, snapped to a candidate; alcoptGPsep."""
+
+    numstart: int = static(default=1)
+    maxit: int = static(default=100)
+
+    def __call__(self, criterion, gp, Xcand, Xref, taken, t, rect, kx=None):
+        return _continuous(
+            criterion,
+            gp,
+            Xcand,
+            Xref,
+            taken,
+            t,
+            rect,
+            numstart=self.numstart,
+            maxit=self.maxit,
+        )
+
+
+_NAMES = {"exhaustive": Exhaustive, "ray": Ray, "continuous": Continuous}
+
+
+def as_search(search) -> Search:
+    """A Search from a name or a Search."""
+    if isinstance(search, Search):
         return search
-    try:
-        return {"exhaustive": exhaustive, "ray": ray, "continuous": continuous}[search]
-    except KeyError:
-        raise ValueError(f"unknown search {search!r}") from None
+    if isinstance(search, str) and search in _NAMES:
+        return _NAMES[search]()
+    raise ValueError(f"unknown search {search!r}")

@@ -1,5 +1,6 @@
 """darg / garg / Igamma.inv against laGP's prior.R."""
 
+import jax
 import numpy as np
 import pytest
 from scipy.special import gamma as sp_gamma
@@ -98,8 +99,16 @@ def test_darg_rejects_start_outside_box(medium):
         darg({"start": 10.0, "min": 0.1, "max": 1.0}, X)
 
 
-def test_get_ds_subsamples_deterministically_with_a_seed(small):
+def test_get_ds_subsamples_deterministically_with_a_key(small):
     X, _ = small
-    a = get_ds(X, samp_size=20, rng=np.random.default_rng(0))
-    b = get_ds(X, samp_size=20, rng=np.random.default_rng(0))
+    a = get_ds(X, samp_size=20, key=jax.random.key(0))
+    b = get_ds(X, samp_size=20, key=jax.random.key(0))
     assert a == b
+
+
+def test_subsampling_without_a_key_is_an_error_not_a_hidden_draw(small):
+    """laGP draws from R's global RNG; lagpax has none, so the key must be explicit."""
+    X, _ = small
+    get_ds(X, samp_size=len(X))  # no subsample, no key needed
+    with pytest.raises(ValueError, match="key=jax.random.key"):
+        get_ds(X, samp_size=20)

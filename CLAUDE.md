@@ -86,42 +86,58 @@ is `Z` and `df` is `n`.
   for the trend. `Ki` is materialized (not just a Cholesky factor) because ALC needs it. `_llik` adds
   the Gamma log-priors when `dab`/`gab` are non-zero. `_profile` is the MLE inner-loop objective —
   one Cholesky, two triangular solves, no explicit inverse. Gradients come from `jax.grad`.
+- `_config.py` — `pytree_config` and `static()`: frozen dataclasses registered with
+  `jax.tree_util.register_dataclass`. A `static()` field is pytree metadata (part of the compiled
+  program, must be hashable); every other field is a child. `Range`, `Local`, every criterion and
+  every search are built this way. No equinox: plain JAX does it.
 - `prior.py` — host-side numpy/scipy port of `darg`/`garg`/`getDs`/`Igamma.inv`, behind
   `Prior.from_design`. Deliberately *not* jitted: it runs once per call and R's `quantile` type 7 ==
-  numpy's default.
-- `optim.py` — `bracketed_newton` for the nugget, `implicit_argmin`, and `R_FTOL`. There is no
-  L-BFGS here any more: `mle._solve_d` and `search.continuous` call `vlse.optim.minimise` directly
-  with `tol=0.0, ftol=R_FTOL` — R's `optim` default `factr=1e7` (times machine epsilon) and
-  `pgtol=0`. `mle._solve_d` turns vlse's state into R's convergence code (1 only when `maxit` ran out
+  numpy's default. `Range` is a pytree whose numbers are leaves and whose `estimate` is static —
+  `mle.fit` branches on it in Python. darg's subsample of a >1000-row design draws with an explicit
+  `key`; a missing key there is a `ValueError`, never a hidden draw.
+- `optim.py` — `bracketed_newton` for the nugget, `implicit_argmin`, and `r_ftol`. There is no
+  L-BFGS here any more: `mle._solve_d` and `search._continuous` call `vlse.optim.minimise` directly
+  with `tol=0.0, ftol=r_ftol(dtype)` — R's `optim` default `factr=1e7` times *float64's* epsilon
+  and `pgtol=0`, in every dtype (scaling by float32's epsilon gives ~1.2 and every fit stops after
+  one step). `mle._solve_d` turns vlse's state into R's convergence code (1 only when `maxit` ran out
   before a stopping rule fired). `bracketed_newton` takes one `dfun` returning `(d, d2)`, so the
   nugget MLE gets both derivatives from a single factorization per iteration. Neither solver
   reproduces R's iterate trajectory; they find the same KKT point.
 - `mle.py` — `mle_d` (with laGP's `0.9*dmin + 0.1*dmax` boundary reset, conv=102), `mle_g`, `jmle`,
   and `fit` dispatching on the prior's `estimate` flags. `jmle` carries `(d, g)` through its
   `while_loop` rather than a GP, so the alternating half-steps stop factorizing a `K` nobody reads.
-- `criteria.py` — `nn`, `alc` (port of `alcGPsep`), `fisher` (port of `efiGP`/`fishGP`), and the
-  `ieci(fmin=, w=, nonug=)` and `mspe(fi=)` factories. A `Criterion` carries `minimize`, so the
-  greedy loop never hardcodes argmax vs argmin — and configurable criteria have to be factories
-  rather than `functools.partial`, because a partial does not forward that attribute and
-  `search._pick` reads it with `getattr(..., False)`.
+- `criteria.py` — `Criterion` subclasses `ALC` (port of `alcGPsep`), `NN`, `Fisher` (port of
+  `efiGP`/`fishGP`), `MSPE(fi=)` (`mspeGP`), `IECI(fmin, w=, nugget=)` (`ieciGPsep`), and `Custom`
+  wrapping a plain function. `minimize` and `cached` are class attributes, so the greedy loop and
+  the searches read them directly. Number-valued settings (`IECI.fmin`, `IECI.w`) are leaves —
+  moving `fmin` every BO step does not recompile; flags (`MSPE.fi`, `IECI.nugget`) are static. The
+  math lives in private functions (`_alc`, `_mspe`, ...); `alc`, `nn`, `fisher` are instances, so
+  `lagpax.alc(gp, Xcand, Xref)` still works. `as_criterion` turns a name or function into one.
 - `blhs.py` — block Latin hypercube subsampling, port of `blhs`/`blhs.loop`. Host-side numpy like
   `prior.py`: every draw has a different row count, so there is nothing to batch. `bootstrap` returns
   a `Prior`.
-- `search.py` — `exhaustive`, `ray`, `continuous`. All three take
-  `(criterion, gp, Xcand, Xref, taken, step, rect)` and return one candidate index. `_block` picks
+- `search.py` — `Search` subclasses `Exhaustive`, `Ray(numrays=, iters=)`,
+  `Continuous(numstart=, maxit=)`, all-static and hashable by value; `as_search` resolves names.
+  Calling one takes `(criterion, gp, Xcand, Xref, taken, step, rect)` and returns one candidate
+  index. `_block` picks
   "the offset-th *available* candidate" the way laGP's deletion from its candidate list does, by
   cumsum + `searchsorted`; an argsort there would dominate the search.
-- `local.py` — `Local`, `Conditioned`, `lagp`/`agp`. `_core` is jitted with a `_Cfg` NamedTuple as the
-  static config; `predict` maps it over predictive locations with `jax.lax.map(batch_size=)`.
+- `local.py` — `Local`, `Conditioned`, `lagp`/`agp`. `Local` is a pytree (sizes, `trend`, `maxit`
+  static; criterion and search as children) and `Conditioned` is a NamedTuple of
+  `(scheme, X, Z, prior)`, so the whole emulator is one pytree. `_core(emu, Xref, d0, lite=)` is
+  jitted with only `lite` static — no hand-built config tuple. `Conditioned.local` is the
+  per-location primitive; `predict` is `jax.lax.map(batch_size=)` over it and `refine` swaps the
+  criterion with `scheme.replace(criterion=...)` between passes.
   `_design` carries the candidate/design cross-covariance across greedy steps. `_buckets` groups the
   greedy steps by padded capacity — step `t` builds its GP at the next power of two above `t`, not at
   `end` — so the loop traces a logarithmic number of bodies.
 
 The public API is flat: `__init__.py` re-exports every name and pins them in `__all__`, so a new
-public function goes in two places there. Importing the package runs
-`jax.config.update("jax_enable_x64", True)` for the whole process: every tolerance in `tests/` assumes
-it and laGP is float64 throughout. (Removing that side effect is part of the redesign proposal in
-`ROADMAP.md`.)
+public name goes in two places there. **Importing lagpax changes no global state.** Computation
+follows the input's floating dtype; laGP parity needs float64, so `tests/conftest.py`,
+`tests/snapshot.py` and `bench/common.py` turn `jax_enable_x64` on before any data exists, and so
+must a user who wants laGP's numbers. Without it the pipeline runs in float32
+(`test_transforms` pins that in a subprocess).
 
 ### Why the mask exists
 
@@ -173,34 +189,42 @@ on the test designs (see `ROADMAP.md` § What we learned).
 ## API
 
 ```python
+jax.config.update("jax_enable_x64", True)   # the caller's choice; needed for laGP parity
+key = jax.random.key(0)
+
 gp = lagpax.GP(X, Z, d, g, mask=None)
 gp.llik(prior=None)                      # MAP when a prior is passed, MLE otherwise
 gp.predict(XX, lite=True, nugget=True)
 gp.update(Xnew, Znew)
 gp.at(d=..., g=...)
 
-prior = lagpax.Prior.from_design(X, Z, rng=None)          # -> Prior(d=Range(...), g=Range(...))
+prior = lagpax.Prior.from_design(X, Z, key=key)  # key needed only when n > 1000 (darg subsamples)
 prior = prior.at(g=lagpax.Range(start=1e-6, estimate=False))
+prior = lagpax.bootstrap(X, Z, m=2, K=32, key=key)
 
-lagpax.alc(gp, Xcand, Xref)              # criteria are (gp, Xcand, Xref) -> Float[Array, "ncand"]
+lagpax.alc(gp, Xcand, Xref)              # criteria: (gp, Xcand, Xref) -> Float[Array, "ncand"]
 lagpax.nn(gp, Xcand, Xref)
-lagpax.fisher(gp, Xcand)                 # Xref optional here: it scores no reference set
-lagpax.ieci(fmin=...)(gp, Xcand, Xref)   # criteria needing config are factories
-lagpax.mspe(fi=True)(gp, Xcand, Xref)
+lagpax.fisher(gp, Xcand)                 # Xref optional: it scores no reference set
+lagpax.IECI(fmin=...)(gp, Xcand, Xref)   # configurable criteria are pytree dataclasses
+lagpax.MSPE(fi=True)(gp, Xcand, Xref)
 
 scheme = lagpax.Local(
     start=6, end=50,
-    criterion="alc",        # "nn" | "alc" | "mspe" | "fisher" | lagpax.ieci(fmin=...) | callable
-    search="exhaustive",    # "exhaustive" | "ray" | "continuous"
+    criterion="alc",        # "nn" | "alc" | "mspe" | "fisher" | a Criterion | a function
+    search="exhaustive",    # "exhaustive" | "ray" | "continuous" | lagpax.Ray(numrays=...) | ...
     trend="zero",           # "zero" | "constant" | "linear"; "zero" reproduces laGP
     close=None, maxit=100,
 )
-emu = scheme.condition(X, Z, prior=None, rng=None)
-out = emu.predict(XX, batch=256)
+scheme = scheme.replace(criterion="nn")
+emu = scheme.condition(X, Z, prior=None, key=key)   # -> Conditioned, a pytree
+out = emu.local(XX[:1], dstart=None)                # the per-location primitive (laGPsep)
+out = emu.predict(XX, batch=256)                    # lax.map over `local` (aGPsep)
+out = jax.vmap(lambda x: emu.local(x[None]))(XX)    # ... or batch it yourself
 out = emu.refine(XX, passes=("nn", "alc"))
+emu = emu._replace(Z=Znew)                          # same scheme and prior, new responses
 
-lagpax.agp(X, Z, XX, **opts)       # whole dataset
-lagpax.lagp(X, Z, Xref, **opts)    # one location — data first, matching agp
+lagpax.agp(X, Z, XX, key=key, **opts)    # whole dataset
+lagpax.lagp(X, Z, Xref, key=key, **opts) # one location — data first, matching agp
 
 out.mean, out.s2, out.df, out.var, out.Xi, out.fit    # var = s2*df/(df-2); Xi 0-based
 ```
@@ -210,6 +234,13 @@ Load-bearing design points:
 - **`condition` is the seam.** Resolving the prior is the only host-side numpy/scipy step; putting it
   up front is what lets everything downstream be pure JAX. Do not let prior resolution leak back into
   the per-location path. It is also where a `bootstrap(...)` prior plugs in.
+- **Static vs leaf is a design decision per field.** Anything that selects code or sets a shape
+  (`start`, `end`, `close`, `trend`, `maxit`, `MSPE.fi`, `Ray.numrays`, `Range.estimate`) is
+  `static()`; anything numeric is a leaf. Getting it wrong is silent: a number marked static
+  recompiles on every change, a flag left as a leaf fails with a ConcretizationTypeError the first
+  time Python branches on it.
+- **No hidden randomness.** Every random draw takes a `jax.random` key. Where R would use its global
+  RNG and no key was passed, raise — do not fall back to a default seed.
 - **`refine` replaces `agpsep_seq`'s kwargs forwarding**, which is where a `d`-resolution bug lived:
   each pass re-ran `darg` and re-subsampled. Its pass loop stays a Python loop — passes may name
   different criteria that trace to different functions.
@@ -217,9 +248,12 @@ Load-bearing design points:
 - **`close`** bounds the candidate set for every search, defaulting to `10*(1000+end)` for ray and
   continuous and `1000+end` for exhaustive, matching laGP.
 
-The public surface is seventeen names: `GP`, `Prior`, `Range`, `Prediction`, `Fit`, `Local`, `agp`,
-`lagp`, `fit`, `alc`, `fisher`, `ieci`, `mspe`, `nn`, `bootstrap`, `distance`, `covar`. Everything
-else stays importable from its own module; `tests/` reaches into `lagpax.optim` and `lagpax.search`.
+The public surface is `__all__` in `__init__.py`: the GP and its fit (`GP`, `Prior`, `Range`,
+`Prediction`, `Fit`, `fit`, `bootstrap`, `distance`, `covar`), the scheme (`Local`, `Conditioned`,
+`agp`, `lagp`), the criteria (`Criterion`, `ALC`, `NN`, `MSPE`, `IECI`, `Fisher`, `Custom`, `alc`,
+`nn`, `fisher`) and the searches (`Search`, `Exhaustive`, `Ray`, `Continuous`). The `ieci(...)` and
+`mspe(...)` factories were removed without aliases while only a stub was on PyPI. Everything else
+stays importable from its own module; `tests/` reaches into `lagpax.optim` and `lagpax.search`.
 
 Two things laGP cannot do, both shipped: **trend models** (`trend="constant"`/`"linear"`, sold as
 interval calibration, not a better mean — `tests/test_trend.py` tests coverage) and **gradients
@@ -312,5 +346,11 @@ as a whole, which is why the floor has to move to 0.1.4 once it is on PyPI.
   closure is not part of its cache key. Call `local._core.clear_cache()` between configurations.
 - vlse reads its default tolerances as arrays created at import; pass `tol`/`ftol` explicitly (as
   the call sites do) rather than relying on them under x64.
+- Under an enclosing trace, `jnp.sqrt(constant)` is a tracer, so `float(jnp.sqrt(...))` raises a
+  ConcretizationTypeError — but only when the caller is inside `jit`/`while_loop`, which eager tests
+  and the snapshot never are. Compute host-side constants with `math`/`numpy`.
+- `some_jitted_fn._cache_size()` counts top-level dispatches only. A jitted function called inside
+  another trace (`_core` inside `predict`'s `lax.map`) is inlined and never touches that cache, so
+  a recompilation test has to call it at top level (`emu.local`, not `emu.predict`).
 - There is no `gh` CLI on the cluster. Check CI with
   `curl -s https://api.github.com/repos/davidesartor/lagpax/actions/runs?per_page=3`.

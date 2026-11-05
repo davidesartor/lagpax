@@ -2,18 +2,32 @@
 
 Lengthscale and continuous-search solves call `vlse.optim.minimise` (L-BFGS-B) directly,
 with R's optim stopping rule: `factr = 1e7` scaled by machine epsilon is scipy's `ftol`,
-and `pgtol = 0` disables the projected-gradient test. `R_FTOL` is that product.
+and `pgtol = 0` disables the projected-gradient test. `r_ftol` is that product.
 """
 
+import math
 from typing import Callable, NamedTuple, Optional
 from jaxtyping import Array, Bool, Float, Int, Scalar
 
 import jax
 import jax.numpy as jnp
 
-EPSMCH = float(jnp.finfo(jnp.float64).eps)
-SDEPS = float(jnp.sqrt(EPSMCH))
-R_FTOL = 1e7 * EPSMCH  # optim(method="L-BFGS-B")'s default factr, as scipy's ftol
+R_FACTR = 1e7  # optim(method="L-BFGS-B")'s default factr
+
+
+R_FTOL = R_FACTR * float(jnp.finfo(jnp.float64).eps)  # as scipy's ftol, ~2.2e-9
+
+
+def r_ftol(dtype) -> float:
+    """R's stopping rule as scipy's `ftol`, whatever the working precision.
+
+    `factr` is defined against double precision, so this stays `factr * eps(float64)`.
+    Scaling it by float32's epsilon would make it ~1.2 -- "stop once the improvement is
+    under 120%" -- and every fit would end after one iteration. In float32 the threshold
+    is below what the arithmetic resolves, and vlse ends the solve on stalled progress.
+    """
+    del dtype  # one rule for every dtype; the argument documents the call site's intent
+    return R_FTOL
 
 
 def implicit_argmin(
@@ -65,7 +79,7 @@ def bracketed_newton(
     lower: Scalar,
     upper: Scalar,
     maxiter: int = 100,
-    tol: float = SDEPS,
+    tol: Optional[float] = None,
 ) -> NewtonResult:
     """Maximize a unimodal scalar objective by Newton on its derivative, bisecting on slips.
 
@@ -76,8 +90,12 @@ def bracketed_newton(
     for the nugget MLE both come out of one forward-over-reverse pass sharing a single
     factorization of K, where two calls would Cholesky it twice per iteration.
     """
-    lower = jnp.asarray(lower, jnp.float64)
-    upper = jnp.asarray(upper, jnp.float64)
+    dtype = jnp.result_type(x0, lower, upper, float)
+    lower = jnp.asarray(lower, dtype)
+    upper = jnp.asarray(upper, dtype)
+    # stop at the square root of the working precision, R's `tol` for optimize()
+    # host-side math: under an enclosing trace, jnp.sqrt of a constant would be a tracer
+    tol = math.sqrt(float(jnp.finfo(dtype).eps)) if tol is None else tol
     dlo, dhi = dfun(lower)[0], dfun(upper)[0]
 
     def cond(state):

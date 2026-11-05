@@ -4,30 +4,44 @@ The only host-side numpy/scipy step in the package. It runs once per pipeline, a
 `quantile` type 7 is numpy's default, so it is deliberately not jitted.
 """
 
+from dataclasses import fields
 from typing import Mapping, NamedTuple, Optional, Union
+from jaxtyping import Array
 
+import jax
 import numpy as np
 import scipy as sp
+
+from ._config import pytree_config, static
 
 SDEPS = float(np.sqrt(np.finfo(float).eps))
 
 
-class Range(NamedTuple):
+@pytree_config
+class Range:
     """Start value, box, Gamma prior `(a, b)`, and whether to estimate the parameter.
 
     Fields left as `None` are filled in by `Prior.at`, which is what makes a partial
-    `Range(start=1e-6, estimate=False)` a usable override.
+    `Range(start=1e-6, estimate=False)` a usable override. A pytree: the numbers are
+    leaves, traced under `jit`; `estimate` is static, since it decides which solver runs.
     """
 
     start: Union[float, np.ndarray, None] = None
     min: Optional[float] = None
     max: Optional[float] = None
     ab: Optional[tuple[float, float]] = None
-    estimate: Optional[bool] = None
+    estimate: Optional[bool] = static(default=None)
 
     def merge(self, other: "Range") -> "Range":
         """`other` wins field by field, ignoring the fields it leaves unset."""
-        return Range(*(o if o is not None else s for s, o in zip(self, other)))
+        return Range(
+            **{
+                f.name: getattr(self, f.name)
+                if getattr(other, f.name) is None
+                else getattr(other, f.name)
+                for f in fields(Range)
+            }
+        )
 
     def check(self) -> None:
         """Port of laGP's check.arg validation."""
@@ -59,10 +73,13 @@ class Prior(NamedTuple):
         d: Spec = None,
         g: Spec = 1 / 10000,
         samp_size: int = 1000,
-        rng: Optional[np.random.Generator] = None,
+        key: Optional[Array] = None,
     ) -> "Prior":
-        """laGP's darg + garg. `g` defaults to laGPsep/aGPsep's nugget, not to garg's."""
-        return cls(d=darg(d, X, samp_size=samp_size, rng=rng), g=garg(g, Z))
+        """laGP's darg + garg. `g` defaults to laGPsep/aGPsep's nugget, not to garg's.
+
+        `key` is needed only when X has more than `samp_size` rows, where darg subsamples.
+        """
+        return cls(d=darg(d, X, samp_size=samp_size, key=key), g=garg(g, Z))
 
     def at(self, d: Spec = None, g: Spec = None) -> "Prior":
         """Override fields of either range, leaving everything unset as it was."""
@@ -93,18 +110,32 @@ def get_ds(
     X: np.ndarray,
     p: float = 0.1,
     samp_size: int = 1000,
-    rng: Optional[np.random.Generator] = None,
+    key: Optional[Array] = None,
 ) -> tuple[float, float, float]:
-    """laGP's getDs: (start, min, max) from the positive off-diagonal squared distances."""
+    """laGP's getDs: (start, min, max) from the positive off-diagonal squared distances.
+
+    A design over `samp_size` rows is subsampled, and that draw needs a `key`. laGP takes
+    it from R's global RNG; there is no global RNG here, so a missing key is an error
+    rather than a hidden, unreproducible draw.
+    """
     X = np.atleast_2d(np.asarray(X, float))
     if X.shape[0] > samp_size:
-        rng = np.random.default_rng() if rng is None else rng
-        X = X[rng.choice(X.shape[0], samp_size, replace=False)]
+        X = X[_choice(key, X.shape[0], samp_size, "darg")]
 
     D = np.sum(np.square(X[:, None, :] - X[None, :, :]), axis=-1)
     D = D[np.triu_indices_from(D, k=1)]
     D = D[D > 0]
     return float(np.quantile(D, p)), float(D.min()), float(D.max())
+
+
+def _choice(key: Optional[Array], n: int, k: int, who: str) -> np.ndarray:
+    """k of n row indices without replacement, drawn with an explicit key."""
+    if key is None:
+        raise ValueError(
+            f"{who} subsamples a design of {n} rows down to {k}, which is random: "
+            "pass key=jax.random.key(...)"
+        )
+    return np.asarray(jax.random.choice(key, n, (k,), replace=False))
 
 
 def _gamma_ab(scale: float) -> tuple[float, float]:
@@ -116,7 +147,7 @@ def darg(
     d: Spec,
     X: np.ndarray,
     samp_size: int = 1000,
-    rng: Optional[np.random.Generator] = None,
+    key: Optional[Array] = None,
 ) -> Range:
     """Default lengthscale start/range/prior from the design, matching laGP's darg."""
     spec = _as_range(d)
@@ -126,7 +157,7 @@ def darg(
         estimate and (spec.max is None or spec.min is None or spec.ab is None)
     )
     start_q, dmin_q, dmax_q = (
-        get_ds(X, samp_size=samp_size, rng=rng) if needs_ds else (0.0, 0.0, 0.0)
+        get_ds(X, samp_size=samp_size, key=key) if needs_ds else (0.0, 0.0, 0.0)
     )
 
     start = np.atleast_1d(

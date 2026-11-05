@@ -16,7 +16,7 @@ import jax.numpy as jnp
 import lagpax as lagp
 from lagpax import search as searches
 from lagpax.criteria import alc
-from lagpax.optim import R_FTOL
+from lagpax.optim import r_ftol
 from vlse.optim import minimise
 
 START, END = 6, 30
@@ -78,18 +78,10 @@ def test_ray_degenerates_to_exhaustive(medium):
         taken = jnp.zeros(len(Xcand), bool)
         score = alc(gp, Xcand, Xref)
 
-        want = searches.exhaustive(alc, gp, Xcand, Xref, taken, 0, rect)
+        want = lagp.Exhaustive()(alc, gp, Xcand, Xref, taken, 0, rect)
         for t in range(4):
-            got = searches.ray(
-                alc,
-                gp,
-                Xcand,
-                Xref,
-                taken,
-                jnp.asarray(t),
-                rect,
-                numrays=len(Xcand),
-                iters=40,
+            got = lagp.Ray(numrays=len(Xcand), iters=40)(
+                alc, gp, Xcand, Xref, taken, jnp.asarray(t), rect
             )
             assert float(score[got]) >= 0.99 * float(score[want])
 
@@ -132,7 +124,11 @@ def test_alcoptgpsep_optima_are_stationary_for_our_gradient(R, medium):
 
         objective = lambda x: -alc(gp, x[None], jnp.asarray(Xref))[0]
         res = minimise(
-            objective, jnp.asarray(want), (rect[0], rect[1]), tol=0.0, ftol=R_FTOL
+            objective,
+            jnp.asarray(want),
+            (rect[0], rect[1]),
+            tol=0.0,
+            ftol=r_ftol(jnp.float64),
         )
         got_alc = float(alc(gp, res.x[None], jnp.asarray(Xref))[0])
 
@@ -247,10 +243,8 @@ def test_unknown_search_is_rejected(medium):
         lagp.lagp(X, Z, X[:1], start=START, end=END, search="teleport")
 
 
-def test_a_search_can_be_configured_with_partial(medium):
+def test_a_search_is_configured_by_its_settings(medium):
     """`criterion x search` is a grid: configuring a search must not need a new name."""
-    from functools import partial
-
     X, Z = medium
     Xref = X[:1] + 0.01
     out = lagp.lagp(
@@ -259,7 +253,7 @@ def test_a_search_can_be_configured_with_partial(medium):
         Xref,
         start=START,
         end=END,
-        search=partial(searches.ray, numrays=8, iters=20),
+        search=lagp.Ray(numrays=8, iters=20),
     )
     assert np.asarray(out.Xi).shape == (END,)
     assert np.isfinite(float(out.mean[0]))

@@ -8,7 +8,7 @@ import jax.numpy as jnp
 from vlse.optim import minimise
 
 from .gp import GP, llik_d, llik_dg, llik_g
-from .optim import R_FTOL, bracketed_newton, implicit_argmin
+from .optim import bracketed_newton, implicit_argmin, r_ftol
 from .prior import Prior
 
 sg = jax.lax.stop_gradient
@@ -56,7 +56,7 @@ def _solve_d(gp: GP, d0, g, dmin, dmax, ab, maxit: int):
         d0,
         bounds=(dmin, dmax),
         tol=0.0,
-        ftol=R_FTOL,
+        ftol=r_ftol(d0.dtype),
         max_iterations=maxit,
     )
     # R's convergence code: 1 only when maxit ran out before any stopping rule fired

@@ -30,14 +30,18 @@ uv sync --extra tests               # + pytest and rpy2 for the parity suite
 ## Quickstart
 
 ```python
+import jax
 import numpy as np
+
+jax.config.update("jax_enable_x64", True)   # laGP is float64; lagpax follows your dtype
 import lagpax
 
 X = np.random.uniform(size=(2000, 4))
 Z = np.sum(np.sin(4 * X), axis=1)
 XX = np.random.uniform(size=(500, 4))
 
-out = lagpax.agp(X, Z, XX, start=6, end=50, criterion="alc")
+key = jax.random.key(0)    # laGP's darg subsamples designs over 1000 rows; no hidden RNG here
+out = lagpax.agp(X, Z, XX, key=key, start=6, end=50, criterion="alc")
 
 out.mean   # (500,) predictive mean
 out.var    # (500,) predictive variance
@@ -46,14 +50,20 @@ out.Xi     # (500, 50) local design indices, 0-based
 
 `criterion` and `search` are a grid, not a list of methods. `criterion="nn"` takes nearest
 neighbours, `criterion="alc"` grows the design greedily by Active Learning Cohn (Gramacy & Apley,
-2015), and `criterion=lagpax.ieci(fmin=...)` scores candidates by expected improvement instead of
-variance, for when the emulator serves optimization. `criterion=lagpax.mspe(fi=True)` adds the error
+2015), and `criterion=lagpax.IECI(fmin=...)` scores candidates by expected improvement instead of
+variance, for when the emulator serves optimization. `criterion=lagpax.MSPE(fi=True)` adds the error
 from re-estimating the lengthscale once the point is added, and `criterion="fisher"` picks the point
 that most sharpens the hyperparameter estimate rather than the prediction — useful when the local fit
-is unstable, and the one criterion that needs no reference set. `search="exhaustive"` scores every candidate;
-`search="ray"` and `search="continuous"` cost a fixed number of criterion evaluations per greedy
-step regardless of how many candidates there are, which is what makes the scheme usable on large
-datasets. Any callable with the criterion signature `(gp, Xcand, Xref) -> scores` drops in.
+is unstable, and the one criterion that needs no reference set. `search="exhaustive"` scores every
+candidate; `search="ray"` and `search="continuous"` (or `lagpax.Ray(numrays=...)`,
+`lagpax.Continuous(numstart=...)`) cost a fixed number of criterion evaluations per greedy step
+regardless of how many candidates there are, which is what makes the scheme usable on large datasets.
+A plain function `(gp, Xcand, Xref) -> scores` drops in as a criterion, or subclass
+`lagpax.Criterion`.
+
+Criteria and searches are small JAX pytrees. Settings that change the program (`MSPE.fi`,
+`Ray.numrays`) are static; settings that are numbers are leaves, so a Bayesian-optimization loop
+that moves `IECI.fmin` every step reuses one compiled program.
 
 Reuse the settings and the design-derived prior across calls by conditioning once:
 
@@ -64,21 +74,26 @@ out = emu.refine(XX, passes=("nn", "alc"))   # warm-start each location from its
 one = emu.local(XX[:1])                      # a single reference set, as laGPsep
 ```
 
+`emu.local` is the per-location primitive, and `predict` is `jax.lax.map` over it. To batch
+differently, map it yourself: `jax.vmap(lambda x: emu.local(x[None]))(XX)`.
+
 On a design too large to fit globally, `bootstrap` estimates one lengthscale from many small block
 Latin hypercube subsamples (`blhs.loop`) and hands it back as a prior, either as a starting point or
 — as laGP uses it — held fixed:
 
 ```python
-prior = lagpax.bootstrap(X, Z, m=2, K=32)                  # -> Prior, d.start from the subsamples
+prior = lagpax.bootstrap(X, Z, m=2, K=32, key=key)         # -> Prior, d.start from the subsamples
 prior = prior.at(d=lagpax.Range(estimate=False))           # laGP's use: one global, fixed d
 out = lagpax.agp(X, Z, XX, prior=prior)
 ```
 
-`condition` resolves the prior — the one host-side step — so everything after it is pure JAX:
-`jax.jit`, `jax.vmap` over datasets and `jax.grad` all apply to `emu.predict` as a whole.
+`condition` resolves the prior — the one host-side step — so everything after it is pure JAX.
+The emulator it returns is itself a pytree (the data and prior are leaves, the scheme's sizes are
+static), so it can be passed into `jax.jit`, rebuilt on new data with `emu._replace(Z=...)`, and
+differentiated through as a whole:
 
 ```python
-prior = lagpax.Prior.from_design(X, Z)                 # resolved once, on the host
+prior = lagpax.Prior.from_design(X, Z, key=key)        # resolved once, on the host
 scheme = lagpax.Local(start=6, end=50, search="ray")
 
 def total(Z):
@@ -104,14 +119,17 @@ are a special case of the separable ones — pass a scalar `d` — which is also
 hypercube subsampling (`blhs`, `blhs.loop`) as `lagpax.bootstrap`. laGP's constrained-optimization
 (`optim.auglag`) and calibration (`fcalib`) layers are out of scope.
 
-The public surface is seventeen names: `GP`, `Prior`, `Range`, `Prediction`, `Fit`, `Local`, `agp`,
-`lagp`, `fit`, `alc`, `ieci`, `mspe`, `fisher`, `nn`, `bootstrap`, `distance`, `covar`. Everything
-else stays importable from its own module (`lagpax.optim.implicit_argmin`, `lagpax.search.ray`,
-`lagpax.mle.jmle`).
+The public surface is the GP and its fit (`GP`, `Prior`, `Range`, `Prediction`, `Fit`, `fit`,
+`bootstrap`, `distance`, `covar`), the local scheme (`Local`, `Conditioned`, `agp`, `lagp`), the
+criteria (`Criterion`, `ALC`, `NN`, `MSPE`, `IECI`, `Fisher`, `Custom`, and the instances `alc`,
+`nn`, `fisher`) and the searches (`Search`, `Exhaustive`, `Ray`, `Continuous`). Everything else
+stays importable from its own module (`lagpax.optim.implicit_argmin`, `lagpax.mle.jmle`).
 
 Conventions follow laGP throughout — correlation `exp(-sum_k (x1_k - x2_k)^2 / d_k)`, nugget `g` on
 the diagonal, scale profiled out as `phi = Z' Ki Z`, Student-t predictive. Two deliberate
-differences: `Xi` indices are 0-based (R is 1-based), and everything is float64. One API difference:
+differences: `Xi` indices are 0-based (R is 1-based), and randomness takes an explicit
+`jax.random` key where R uses its global RNG. Computation follows the input dtype; laGP parity
+needs `jax_enable_x64`, which lagpax does not switch on for you. One API difference:
 laGP's `laGPsep` returns a raw `s2` while `aGPsep` returns `s2 * df/(df - 2)`; here both return a
 `Prediction` carrying `s2`, `df` and a `var` property, so the conversion is explicit.
 

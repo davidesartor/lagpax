@@ -7,6 +7,11 @@ os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=1")
 # BLAS must be pinned before R loads, so laGP's omp.threads is the only knob that varies
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
+# laGP is float64 throughout; lagpax follows the input dtype, so parity needs x64 on first
+import jax
+
+jax.config.update("jax_enable_x64", True)
+
 import time
 from pathlib import Path
 from typing import Callable

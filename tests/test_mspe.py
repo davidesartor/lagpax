@@ -111,7 +111,7 @@ def test_fisher_matches_r_on_a_wider_design(R, wide):
 @pytest.mark.parametrize("fi", [True, False])
 def test_mspe_matches_r(R, small, fi):
     Xd, Zd, Xcand, Xref = _split(small)
-    got = np.asarray(lagp.mspe(fi=fi)(_gp(Xd, Zd), jnp.array(Xcand), jnp.array(Xref)))
+    got = np.asarray(lagp.MSPE(fi=fi)(_gp(Xd, Zd), jnp.array(Xcand), jnp.array(Xref)))
     want = np.asarray(
         _r(
             R,
@@ -128,7 +128,7 @@ def test_mspe_matches_r(R, small, fi):
 
 def test_mspe_matches_r_with_one_reference(R, small):
     Xd, Zd, Xcand, Xref = _split(small, nref=1)
-    got = np.asarray(lagp.mspe()(_gp(Xd, Zd), jnp.array(Xcand), jnp.array(Xref)))
+    got = np.asarray(lagp.MSPE()(_gp(Xd, Zd), jnp.array(Xcand), jnp.array(Xref)))
     want = np.asarray(
         _r(
             R,
@@ -145,7 +145,7 @@ def test_mspe_matches_r_with_one_reference(R, small):
 def test_mspe_matches_r_on_a_wider_design(R, wide):
     X, Z = wide
     Xd, Zd, Xcand, Xref = X[:150], Z[:150], X[150:180], X[180:] + 0.01
-    got = np.asarray(lagp.mspe()(_gp(Xd, Zd), jnp.array(Xcand), jnp.array(Xref)))
+    got = np.asarray(lagp.MSPE()(_gp(Xd, Zd), jnp.array(Xcand), jnp.array(Xref)))
     want = np.asarray(
         _r(
             R,
@@ -160,7 +160,7 @@ def test_mspe_matches_r_on_a_wider_design(R, wide):
 
 
 def test_mspe_is_minimized_and_fisher_is_maximized():
-    assert lagp.mspe().minimize is True
+    assert lagp.MSPE().minimize is True
     assert getattr(lagp.fisher, "minimize", False) is False
 
 
@@ -169,7 +169,7 @@ def test_mspe_tracks_alc_when_the_fisher_term_is_off(small):
     Xd, Zd, Xcand, Xref = _split(small)
     gp = _gp(Xd, Zd)
     alc = np.asarray(lagp.alc(gp, jnp.array(Xcand), jnp.array(Xref)))
-    got = np.asarray(lagp.mspe(fi=False)(gp, jnp.array(Xcand), jnp.array(Xref)))
+    got = np.asarray(lagp.MSPE(fi=False)(gp, jnp.array(Xcand), jnp.array(Xref)))
     assert np.argmin(got) == np.argmax(alc)
 
 
@@ -178,7 +178,7 @@ def test_the_criteria_jit_and_differentiate(small):
     gp = _gp(Xd, Zd)
     Xcand, Xref = jnp.array(Xcand), jnp.array(Xref)
 
-    for criterion in (lagp.mspe(), lagp.fisher):
+    for criterion in (lagp.MSPE(), lagp.fisher):
         got = criterion(gp, Xcand, Xref)
         # 1e-9, not exact: these run a Hessian through a Cholesky, and jit reassociates it
         np.testing.assert_allclose(
@@ -198,14 +198,14 @@ def test_the_criteria_drive_the_local_scheme(small):
 
 
 def test_mspe_named_lookup_uses_lagps_default():
-    from lagpax.criteria import _named
+    from lagpax.criteria import as_criterion
 
     Xd = np.random.default_rng(0).random((20, 2))
     Zd = Xd.sum(-1)
     gp = _gp(Xd, Zd)
     Xcand, Xref = jnp.array(Xd[:5] + 0.01), jnp.array(Xd[5:8] + 0.02)
     np.testing.assert_allclose(
-        np.asarray(_named("mspe")(gp, Xcand, Xref)),
-        np.asarray(lagp.mspe(fi=True)(gp, Xcand, Xref)),
+        np.asarray(as_criterion("mspe")(gp, Xcand, Xref)),
+        np.asarray(lagp.MSPE(fi=True)(gp, Xcand, Xref)),
         rtol=1e-12,
     )

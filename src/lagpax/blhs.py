@@ -12,6 +12,7 @@ so the `K` fits are different shapes and there is nothing to batch.
 from typing import Optional
 from jaxtyping import Array, Bool, Float, Int
 
+import jax
 import numpy as np
 
 from .gp import GP
@@ -19,12 +20,12 @@ from .mle import mle_d
 from .prior import Prior, Range
 
 
-def latin(
-    m: int, k: int, rng: Optional[np.random.Generator] = None
-) -> Int[Array, "m k"]:
+def latin(key: Array, m: int, k: int) -> Int[Array, "m k"]:
     """An (m, k) Latin hypercube of 1-based block labels: one permutation per dimension."""
-    rng = np.random.default_rng() if rng is None else rng
-    return np.stack([rng.permutation(m) + 1 for _ in range(k)], axis=1)
+    keys = jax.random.split(key, k)
+    return np.stack(
+        [np.asarray(jax.random.permutation(c, m)) + 1 for c in keys], axis=1
+    )
 
 
 def _code(B: Int[Array, "n k"], m: int) -> Int[Array, "n"]:
@@ -58,7 +59,8 @@ def subsample(
     X: Float[Array, "n k"],
     Z: Float[Array, "n"],
     m: int,
-    rng: Optional[np.random.Generator] = None,
+    *,
+    key: Array,
 ) -> tuple[Float[Array, "ns k"], Float[Array, "ns"]]:
     """One blhs draw: the rows of (X, Z) inside a random Latin hypercube of m blocks."""
     X = np.atleast_2d(np.asarray(X, float))
@@ -70,7 +72,7 @@ def subsample(
     if m > len(X) ** (1.0 / (k - 1)):
         raise ValueError("must have m <= n^(1/(k-1))")
 
-    sel = blocks(X, m, latin(m, k, rng))
+    sel = blocks(X, m, latin(key, m, k))
     return X[sel], np.asarray(Z, float)[sel]
 
 
@@ -82,7 +84,8 @@ def bootstrap(
     prior: Optional[Prior] = None,
     g: float = 1e-3,
     maxit: int = 100,
-    rng: Optional[np.random.Generator] = None,
+    *,
+    key: Array,
 ) -> Prior:
     """Median of K lengthscale MLEs on block-bootstrapped subsamples, per blhs.loop.
 
@@ -91,7 +94,8 @@ def bootstrap(
     """
     X = np.atleast_2d(np.asarray(X, float))
     Z = np.asarray(Z, float)
-    prior = Prior.from_design(X, Z, rng=rng) if prior is None else prior
+    key, sub = jax.random.split(key)
+    prior = Prior.from_design(X, Z, key=sub) if prior is None else prior
     ab = tuple(float(v) for v in prior.d.ab)
 
     # laGP widens the upper bound tenfold for the subsample fits, and for those only
@@ -100,13 +104,13 @@ def bootstrap(
     fitted = [
         np.asarray(
             mle_d(
-                GP(*subsample(X, Z, m, rng=rng), prior.d.start, g),
+                GP(*subsample(X, Z, m, key=k), prior.d.start, g),
                 float(prior.d.min),
                 dmax,
                 ab=ab,
                 maxit=maxit,
             ).d
         )
-        for _ in range(K)
+        for k in jax.random.split(key, K)
     ]
     return prior.at(d=Range(start=np.median(np.stack(fitted), axis=0)))
