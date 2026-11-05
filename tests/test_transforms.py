@@ -6,20 +6,25 @@ import numpy as np
 import pytest
 
 import lagpax as lagp
-from lagpax.fit import fit_kernel
-from lagpax.prior import Param, Prior
+from helpers import make_gp
+from lagpax.fitting import fit_squared_lengthscales
+from lagpax.priors import GammaPrior, Param, Prior
 
 D = np.array([0.3, 0.7, 1.1])
 G = 1e-3
 
 
 def _local(X, Z, Xref, **settings):
-    return lagp.LocalGP(init=6, neighbors=30, **settings).fit(X, Z).local(Xref)
+    return (
+        lagp.LocalGP(initial_neighbors=6, neighbors=30, **settings)
+        .fit(X, Z)
+        .predict_local(Xref)
+    )
 
 
 def _gp(small):
     X, Z = small
-    return lagp.GP(jnp.array(X), jnp.array(Z), jnp.array(D), G)
+    return make_gp(jnp.array(X), jnp.array(Z), jnp.array(D), G)
 
 
 _FLOAT32_RUN = """
@@ -30,7 +35,7 @@ rng = np.random.default_rng(0)
 X = rng.random((200, 2))
 Z = np.sin(4 * X[:, 0]) + X[:, 1]
 XX = rng.random((5, 2))
-out = lagpax.LocalGP(init=6, neighbors=20).fit(X, Z)(XX)
+out = lagpax.LocalGP(initial_neighbors=6, neighbors=20).fit(X, Z)(XX)
 assert out.mean.dtype == np.float32, out.mean.dtype
 assert np.allclose(np.asarray(out.mean), np.sin(4 * XX[:, 0]) + XX[:, 1], atol=1e-2)
 assert np.all(np.asarray(out.fit.iterations) > 1), "float32 fits must not stop after one step"
@@ -63,7 +68,8 @@ def test_gp_is_a_pytree(small):
     gp = _gp(small)
     leaves, treedef = jax.tree.flatten(gp)
     assert all(isinstance(v, jax.Array) for v in leaves)
-    assert jax.tree.unflatten(treedef, leaves).phi == gp.phi
+    rebuilt = jax.tree.unflatten(treedef, leaves)
+    assert rebuilt.residual_sum_of_squares == gp.residual_sum_of_squares
 
 
 def test_log_likelihood_jits_and_differentiates(small):
@@ -71,7 +77,7 @@ def test_log_likelihood_jits_and_differentiates(small):
     d = jnp.array(D)
 
     def f(d):
-        return lagp.GP(jnp.array(X), jnp.array(Z), d, G).log_likelihood()
+        return make_gp(jnp.array(X), jnp.array(Z), d, G).log_likelihood()
 
     assert float(jax.jit(f)(d)) == pytest.approx(float(f(d)), rel=1e-14)
     grad = np.asarray(jax.grad(f)(d))
@@ -96,13 +102,17 @@ def test_pred_vmaps_over_locations(small):
 def test_the_fit_jits(small):
     gp = _gp(small)
     prior = Prior(
-        theta=Param(lower=1e-3, upper=10.0, gamma=(1.5, 3.9), learn=True),
+        squared_lengthscale=Param(
+            lower=1e-3, upper=10.0, prior=GammaPrior(1.5, 3.9), learn=True
+        ),
         nugget=Param(learn=False),
     )
-    f = jax.jit(lambda gp, prior: fit_kernel(gp, prior)[1].theta)
+    f = jax.jit(
+        lambda gp, prior: fit_squared_lengthscales(gp, prior)[1].squared_lengthscales
+    )
     np.testing.assert_allclose(
         np.asarray(f(gp, prior)),
-        np.asarray(fit_kernel(gp, prior)[1].theta),
+        np.asarray(fit_squared_lengthscales(gp, prior)[1].squared_lengthscales),
         rtol=1e-12,
     )
 
@@ -112,7 +122,7 @@ def test_no_nans_anywhere_in_a_local_fit(medium):
     out = _local(X, Z, X[:1] + 0.01)
     for name in ("mean", "variance", "log_likelihood"):
         assert np.all(np.isfinite(np.asarray(getattr(out, name)))), name
-    assert np.all(np.isfinite(np.asarray(out.fit.theta)))
+    assert np.all(np.isfinite(np.asarray(out.fit.squared_lengthscales)))
 
 
 def test_local_design_indices_are_unique(medium):
@@ -128,7 +138,7 @@ def test_masked_gp_has_no_nan_gradient(small):
     mask = jnp.arange(len(X)) < 20
 
     def f(d):
-        return lagp.GP(jnp.array(X), jnp.array(Z), d, G, mask).log_likelihood()
+        return make_gp(jnp.array(X), jnp.array(Z), d, G, mask).log_likelihood()
 
     assert np.all(np.isfinite(np.asarray(jax.grad(f)(jnp.array(D)))))
 
@@ -143,7 +153,7 @@ def test_predictions_are_deterministic(medium):
 
 def _emu(medium, **settings):
     X, Z = medium
-    return lagp.LocalGP(init=6, neighbors=16, **settings).fit(X, Z)
+    return lagp.LocalGP(initial_neighbors=6, neighbors=16, **settings).fit(X, Z)
 
 
 def test_the_emulator_is_a_pytree_that_jit_takes_as_an_argument(medium):
@@ -151,10 +161,12 @@ def test_the_emulator_is_a_pytree_that_jit_takes_as_an_argument(medium):
     emu = _emu(medium)
     XX = medium[0][:3] + 0.01
     leaves = jax.tree.leaves(emu)
-    assert any(v is emu.X for v in leaves) and any(v is emu.y for v in leaves)
+    assert any(v is emu.inputs for v in leaves) and any(
+        v is emu.outputs for v in leaves
+    )
 
-    eager = emu(XX, batch=None).mean
-    jitted = jax.jit(lambda e, x: e(x, batch=None).mean)(emu, XX)
+    eager = emu(XX, batch_size=None).mean
+    jitted = jax.jit(lambda e, x: e(x, batch_size=None).mean)(emu, XX)
     np.testing.assert_allclose(np.asarray(jitted), np.asarray(eager), rtol=1e-9)
 
 
@@ -167,7 +179,7 @@ def test_vmap_over_the_per_location_function_matches_the_emulator(medium):
     """
     emu = _emu(medium)
     XX = medium[0][:4] + 0.01
-    mapped = jax.vmap(lambda x: emu.local(x[None]).mean[0])(jnp.asarray(XX))
+    mapped = jax.vmap(lambda x: emu.predict_local(x[None]).mean[0])(jnp.asarray(XX))
     np.testing.assert_allclose(
         np.asarray(mapped), np.asarray(emu(XX).mean), rtol=1e-4, atol=1e-8
     )
@@ -175,24 +187,35 @@ def test_vmap_over_the_per_location_function_matches_the_emulator(medium):
 
 def test_ieci_incumbent_is_data_and_its_flags_are_program(medium):
     """Moving `fmin` -- every step of a BO loop -- must not recompile; `nugget` must."""
-    from lagpax.model import _core
+    from lagpax.local import _predict_local
 
-    # `local` dispatches `_core` at top level, where its compile cache is what counts;
+    # `predict_local` dispatches `_predict_local` at top level, where its compile cache is what counts;
     # inside `emu(...)` it is traced into lax.map's body instead
     x = medium[0][:1] + 0.01
-    _emu(medium, criterion=lagp.IECI(fmin=0.0)).local(x)
-    compiled = _core._cache_size()
+    _emu(
+        medium,
+        criterion=lagp.IntegratedExpectedConditionalImprovement(best_observed=0.0),
+    ).predict_local(x)
+    compiled = _predict_local._cache_size()
 
-    _emu(medium, criterion=lagp.IECI(fmin=0.5)).local(x)
-    assert _core._cache_size() == compiled
+    _emu(
+        medium,
+        criterion=lagp.IntegratedExpectedConditionalImprovement(best_observed=0.5),
+    ).predict_local(x)
+    assert _predict_local._cache_size() == compiled
 
-    _emu(medium, criterion=lagp.IECI(fmin=0.5, nugget=False)).local(x)
-    assert _core._cache_size() == compiled + 1
+    _emu(
+        medium,
+        criterion=lagp.IntegratedExpectedConditionalImprovement(
+            best_observed=0.5, include_nugget=False
+        ),
+    ).predict_local(x)
+    assert _predict_local._cache_size() == compiled + 1
 
 
 def test_names_and_objects_are_the_same_scheme():
     assert lagp.LocalGP(criterion="nn", search="ray") == lagp.LocalGP(
-        criterion=lagp.NN(), search=lagp.Ray()
+        criterion=lagp.NearestNeighbor(), search=lagp.RaySearch()
     )
     with pytest.raises(ValueError, match="unknown search"):
         lagp.LocalGP(search="teleport")

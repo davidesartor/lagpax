@@ -36,67 +36,69 @@ import numpy as np
 jax.config.update("jax_enable_x64", True)   # float64, as laGP; lagpax follows your dtype
 import lagpax
 
-X = np.random.uniform(size=(2000, 4))
-y = np.sum(np.sin(4 * X), axis=1)
-Xnew = np.random.uniform(size=(500, 4))
+inputs = np.random.uniform(size=(2000, 4))
+outputs = np.sum(np.sin(4 * inputs), axis=1)
+new_inputs = np.random.uniform(size=(500, 4))
 
 key = jax.random.key(0)    # the default prior subsamples designs over 1000 rows; no hidden RNG
 model = lagpax.LocalGP(neighbors=50, criterion="alc")
-emulator = model.fit(X, y, key=key)
-prediction = emulator(Xnew)
+emulator = model.fit(inputs, outputs, key=key)
+prediction = emulator(new_inputs)
 
-prediction.mean        # (500,) predictive mean
-prediction.variance    # (500,) predictive variance (Student-t, with `dof` degrees of freedom)
-prediction.neighbors   # (500, 50) rows of X each local GP used
-prediction.fit.theta   # (500, 4) each local GP's fitted kernel parameters
+prediction.mean                      # (500,)
+prediction.variance                  # (500,) Student-t predictive variance
+prediction.degrees_of_freedom        # (500,)
+prediction.neighbors                 # (500, 50) training rows each local GP used
+prediction.fit.squared_lengthscales  # (500, 4) each local GP's fitted kernel parameter
 ```
 
-Each row of `Xnew` gets its own GP on `neighbors` training points. The first `init` (default 6)
-are its nearest neighbours; the rest are chosen greedily by the `criterion`:
+Each row of `new_inputs` gets its own GP on `neighbors` training points. The first
+`initial_neighbors` (default 6) are its nearest neighbours; the rest are chosen one at a time by
+the `criterion`:
 
-- `"nn"` — nearest neighbours only.
-- `"alc"` — Active Learning Cohn: the point that most reduces predictive variance at the target
-  (Gramacy & Apley, 2015). The default.
-- `lagpax.IECI(fmin=...)` — integrated expected conditional improvement, for when the emulator
+- `"nn"` / `lagpax.NearestNeighbor()` — nearest neighbours only.
+- `"alc"` / `lagpax.ActiveLearningCohn()` — the point that most reduces predictive variance at the
+  target (Gramacy & Apley, 2015). The default.
+- `lagpax.IntegratedExpectedConditionalImprovement(best_observed=...)` — for when the emulator
   serves optimization.
-- any function `(gp, Xcand, Xref) -> scores`, or a `lagpax.Criterion` subclass.
+- any function `(gp, candidates, references) -> scores`, or a `lagpax.Criterion` subclass.
 
-and searched by the `search`: `"exhaustive"` scores every candidate, while `"ray"` and
-`"continuous"` (`lagpax.Ray(numrays=...)`, `lagpax.Continuous(numstart=...)`) cost a fixed number
-of evaluations per step however many candidates there are, which is what keeps large datasets
+and looked for by the `search`: `"exhaustive"` scores every candidate, while `"ray"` and
+`"continuous"` (`lagpax.RaySearch(rays=...)`, `lagpax.ContinuousSearch(starts=...)`) cost a fixed
+number of evaluations per step however many candidates there are, which keeps large datasets
 tractable.
 
 ### The kernel and its prior
 
-The kernel is `exp(-sum_k (x_k - x'_k)^2 / theta_k)` plus a `nugget` on the diagonal, with the
-scale profiled out. `theta` is a squared lengthscale; `FitInfo.lengthscale` gives the
-conventional `l = sqrt(theta / 2)`. Each local GP fits `theta` (and, optionally, the nugget) by
-MAP under a `Prior`, whose defaults come from the data:
+The kernel is `exp(-sum_k (x_k - x'_k)^2 / s_k)` plus a `nugget` on the diagonal, with the scale
+profiled out; `s` are squared lengthscales, and `FitResult.lengthscales` gives the conventional
+`l = sqrt(s / 2)`. Each local GP fits `s` (and optionally the nugget) by MAP under a `Prior`, whose
+defaults come from the data:
 
 ```python
-prior = lagpax.Prior.from_data(X, y, key=key)                       # Gamma prior on theta
-prior = lagpax.Prior.from_data(X, y, key=key, space="lengthscale")  # ... or on l instead
-prior = prior.replace(nugget=lagpax.Param(learn=True))              # also learn the nugget
-emulator = model.fit(X, y, prior=prior)
+prior = lagpax.Prior.from_data(inputs, outputs, key=key)        # Gamma prior on s, laGP's default
+prior = lagpax.Prior.from_data(inputs, outputs, key=key, kernel_space="lengthscale")  # ... on l
+prior = prior.replace(nugget=lagpax.Param(learn=True))          # also learn the nugget
+emulator = model.fit(inputs, outputs, prior=prior)
 ```
 
-The two spaces have the same likelihood but different MAP estimates, since a Gamma density on `l`
-is not one on `theta`. The default, `theta`, reproduces laGP exactly.
+The two kernel spaces have the same likelihood but different MAP estimates, since a Gamma density
+on `l` is not one on `s`. The default, squared lengthscales, reproduces laGP exactly.
 
 ### Composing with JAX
 
 `fit` resolves the prior — the one host-side step — and returns an `Emulator`, which is a pytree:
 the data and prior are leaves, the model's sizes are static. So it crosses `jax.jit`, takes new
-data with `emulator._replace(y=...)`, and differentiates as a whole:
+data with `emulator._replace(outputs=...)`, and differentiates as a whole:
 
 ```python
-prior = lagpax.Prior.from_data(X, y, key=key)
+prior = lagpax.Prior.from_data(inputs, outputs, key=key)
 model = lagpax.LocalGP(neighbors=50, search="ray")
 
-def total(y):
-    return model.fit(X, y, prior=prior)(Xnew).mean.sum()
+def total(outputs):
+    return model.fit(inputs, outputs, prior=prior)(new_inputs).mean.sum()
 
-grad = jax.grad(total)(y)                            # jax.jit(total) works too
+gradient = jax.grad(total)(outputs)                 # jax.jit(total) works too
 ```
 
 Gradients run through each local hyperparameter fit by the implicit function theorem at the
@@ -104,17 +106,24 @@ optimum, so they cost one small Hessian solve rather than a tape over the optimi
 hyperparameter resting on a bound — a nugget pinned at its floor on noiseless data — is an active
 constraint, and its gradient is reported as exactly zero rather than smoothed over.
 
-`emulator.local(Xref)` is the per-location primitive (one GP for a whole reference set, with
-`full_cov=True` for a joint covariance); `emulator(Xnew, batch=256)` is `jax.lax.map` over it, and
-`jax.vmap(lambda x: emulator.local(x[None]))(Xnew)` batches it with vmap instead.
-`emulator.refine(Xnew, passes=("nn", "alc"))` predicts in passes, each starting every location
-from the last pass's fit — designs are chosen at the *starting* `theta`, so this picks
-neighbourhoods that respect which inputs matter, cutting rmse ~1.7-2x on anisotropic problems.
+`emulator.predict_local(references)` is the per-point primitive (one GP for a whole reference set,
+`full_covariance=True` for a joint covariance); `emulator(new_inputs, batch_size=256)` is
+`jax.lax.map` over it, and `jax.vmap(lambda x: emulator.predict_local(x[None]))(new_inputs)` batches
+it with vmap instead. `emulator.refine(new_inputs, passes=("nn", "alc"))` predicts in passes, each
+starting every point from the last pass's fit — designs are chosen at the *starting* squared
+lengthscales, so this picks neighbourhoods that respect which inputs matter, cutting rmse ~1.7-2x
+on anisotropic problems.
 
-Criteria and searches are small pytrees too: settings that change the program (`IECI.nugget`,
-`Ray.numrays`) are static, settings that are numbers are leaves, so a Bayesian-optimization loop
-that moves `IECI.fmin` every step reuses one compiled program. Nothing in lagpax touches global JAX
-state, and there is no hidden randomness: anything random takes a `jax.random` key.
+Criteria and searches are small pytrees too: settings that change the program
+(`include_nugget`, `rays`) are static, settings that are numbers are leaves, so a
+Bayesian-optimization loop that moves `best_observed` every step reuses one compiled program.
+Nothing in lagpax touches global JAX state, and there is no hidden randomness: anything random
+takes a `jax.random` key.
+
+The lower level is public too: `lagpax.GaussianProcess.from_data(inputs, outputs,
+lagpax.Hyperparameters(squared_lengthscales, nugget))` is an exact GP with `log_likelihood`,
+`predict`, `with_hyperparameters` and `with_observations`, and `lagpax.fit_hyperparameters(gp,
+prior)` fits it.
 
 ## Scope
 
@@ -150,7 +159,7 @@ means and log-likelihoods match to ~1e-12, while the variance is `1 + g - k' Ki 
 whose absolute error tracks the O(1) intermediate rather than the ~1e-3 result, so it is checked at
 `rtol=1e-8`.
 
-The optimizers (L-BFGS-B from [vlse](https://github.com/davidesartor/vlse) for `theta`, a
+The optimizers (L-BFGS-B from [vlse](https://github.com/davidesartor/vlse) for the kernel, a
 safeguarded Newton iteration for the nugget) do not reproduce R's iterate trajectory — they find the
 same KKT point. Tests assert that, plus that our likelihood is never worse than laGP's. On noiseless
 designs the nugget pins to its lower bound in a badly conditioned regime where the two disagree in

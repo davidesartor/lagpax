@@ -7,11 +7,12 @@ import jax
 import jax.numpy as jnp
 
 import lagpax as lagp
+from helpers import make_gp
 
 
 def _split(X, Z, ndesign=25, ncand=10):
     d = np.array([0.4, 0.6, 0.5][: X.shape[1]] + [0.5] * (X.shape[1] - 3))
-    gp = lagp.GP(X[:ndesign], Z[:ndesign], d, 1e-6)
+    gp = make_gp(X[:ndesign], Z[:ndesign], d, 1e-6)
     Xcand = jnp.asarray(X[ndesign : ndesign + ncand])
     Xref = jnp.asarray(X[ndesign + ncand : ndesign + ncand + 5])
     return gp, Xcand, Xref, float(np.min(Z[:ndesign]))
@@ -20,10 +21,10 @@ def _split(X, Z, ndesign=25, ncand=10):
 def _new_gpsep(R, gp):
     R(
         "gpi <- newGPsep(Xd, Zd, d=dd, g=gg, dK=TRUE)",
-        Xd=np.asarray(gp.X),
-        Zd=np.asarray(gp.y),
-        dd=np.asarray(gp.theta),
-        gg=np.array([float(gp.nugget)]),
+        Xd=np.asarray(gp.inputs),
+        Zd=np.asarray(gp.outputs),
+        dd=np.asarray(gp.hyperparameters.squared_lengthscales),
+        gg=np.array([float(gp.hyperparameters.nugget)]),
     )
 
 
@@ -44,7 +45,11 @@ def test_ieci_matches_iecigpsep(R, request, fixture, rtol, nugget):
             Xref=np.asarray(Xref),
         )
     ).ravel()
-    got = np.asarray(lagp.IECI(fmin=fmin, nugget=nugget)(gp, Xcand, Xref))
+    got = np.asarray(
+        lagp.IntegratedExpectedConditionalImprovement(
+            best_observed=fmin, include_nugget=nugget
+        )(gp, Xcand, Xref)
+    )
     np.testing.assert_allclose(got, want, rtol=rtol)
 
 
@@ -63,7 +68,11 @@ def test_ieci_weights_match_lagp(R, small):
             w=w,
         )
     ).ravel()
-    got = np.asarray(lagp.IECI(fmin=fmin, w=jnp.asarray(w))(gp, Xcand, Xref))
+    got = np.asarray(
+        lagp.IntegratedExpectedConditionalImprovement(
+            best_observed=fmin, weights=jnp.asarray(w)
+        )(gp, Xcand, Xref)
+    )
     np.testing.assert_allclose(got, want, rtol=1e-10)
 
 
@@ -75,28 +84,31 @@ def test_ieci_is_minimized_and_alc_is_not():
     """
     X = np.linspace(0.0, 1.0, 11)[:, None]
     Z = (X[:, 0] - 0.2) ** 2
-    gp = lagp.GP(X, Z, np.array([0.1]), 1e-6)
+    gp = make_gp(X, Z, np.array([0.1]), 1e-6)
     Xcand = jnp.asarray(np.linspace(0.02, 0.98, 49)[:, None])
 
-    scores = lagp.IECI(fmin=float(Z.min()))(gp, Xcand, Xcand)
+    criterion = lagp.IntegratedExpectedConditionalImprovement(best_observed=float(Z.min()))
+    scores = criterion(gp, Xcand, Xcand)
     best = float(Xcand[jnp.argmin(scores), 0])
     assert abs(best - 0.2) < 0.05
 
-    edge = float(Xcand[jnp.argmax(lagp.alc(gp, Xcand, Xcand)), 0])
+    edge = float(Xcand[jnp.argmax(lagp.ActiveLearningCohn()(gp, Xcand, Xcand)), 0])
     assert min(edge, 1.0 - edge) < 0.05
 
 
 def test_ieci_declares_its_direction():
     """The greedy loop reads `minimize` off the criterion instead of hardcoding argmax."""
-    assert lagp.IECI(fmin=0.0).minimize is True
-    assert getattr(lagp.alc, "minimize", False) is False
+    assert lagp.IntegratedExpectedConditionalImprovement(
+        best_observed=0.0
+    ).lower_is_better
+    assert not lagp.ActiveLearningCohn().lower_is_better
 
 
 def test_ieci_gradient_matches_finite_differences(small):
     """Differentiability is the reason a criterion needs no hand-written derivative."""
     X, Z = small
     gp, Xcand, Xref, fmin = _split(X, Z)
-    criterion = lagp.IECI(fmin=fmin)
+    criterion = lagp.IntegratedExpectedConditionalImprovement(best_observed=fmin)
     scalar = lambda x: criterion(gp, x[None], Xref)[0]
 
     x0 = Xcand[0]
@@ -116,25 +128,34 @@ def test_the_local_model_runs_with_ieci(medium):
     X, Z = medium
     XX = np.random.default_rng(4).random((6, X.shape[1]))
     fmin = float(Z.min())
-    model = lagp.LocalGP(init=6, neighbors=20)
-    out = model.replace(criterion=lagp.IECI(fmin=fmin)).fit(X, Z)(XX, batch=3)
+    model = lagp.LocalGP(initial_neighbors=6, neighbors=20)
+    out = model.replace(
+        criterion=lagp.IntegratedExpectedConditionalImprovement(best_observed=fmin)
+    ).fit(X, Z)(XX, batch_size=3)
     assert np.all(np.isfinite(np.asarray(out.mean)))
     assert np.asarray(out.neighbors).shape == (6, 20)
 
     # one reference location, so ECI is monotone in the variance reduction there and the
     # minimize criterion has to reproduce ALC's design exactly -- proof the direction is
     # handled generically rather than by luck
-    alc_design = model.fit(X, Z)(XX, batch=3).neighbors
+    alc_design = model.fit(X, Z)(XX, batch_size=3).neighbors
     np.testing.assert_array_equal(np.asarray(out.neighbors), np.asarray(alc_design))
 
     # with several reference locations the monotone tie breaks and the designs diverge
     Xref = XX[:3]
-    ours = model.replace(criterion=lagp.IECI(fmin=fmin)).fit(X, Z).local(Xref).neighbors
-    theirs = model.fit(X, Z).local(Xref).neighbors
+    ours = (
+        model.replace(
+            criterion=lagp.IntegratedExpectedConditionalImprovement(best_observed=fmin)
+        )
+        .fit(X, Z)
+        .predict_local(Xref)
+        .neighbors
+    )
+    theirs = model.fit(X, Z).predict_local(Xref).neighbors
     assert not np.array_equal(np.asarray(ours), np.asarray(theirs))
 
 
-def test_ieci_by_name_explains_it_needs_fmin(medium):
+def test_ieci_by_name_explains_it_needs_the_best_observed_value(medium):
     X, Z = medium
-    with pytest.raises(ValueError, match="fmin"):
-        lagp.LocalGP(init=6, neighbors=20, criterion="ieci")
+    with pytest.raises(ValueError, match="best observed value"):
+        lagp.LocalGP(initial_neighbors=6, neighbors=20, criterion="ieci")

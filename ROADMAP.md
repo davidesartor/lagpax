@@ -21,7 +21,8 @@ optimization benchmark surfaces. What is left before a first release is in § Ne
 | 5 | MSPE, Fisher, block-bootstrap subsampling | `f6b4579` |
 | 6 | L-BFGS-B from `vlse.optim.minimise`; parity on vlse's SFU surfaces (`tests/test_vlse.py`) | branch `ccr-7f9aed99-rlk3k1` |
 | 7 | JAX-native API: no import side effect, explicit keys, pytree criteria/searches/emulator | `332e6cf` |
-| 8 | Hard redesign: lagpax's own API (`LocalGP`/`Emulator`/`Prior`/`Param`), theta-or-lengthscale priors, laGP-isms dropped | branch `ccr-7f9aed99-rlk3k1` |
+| 8 | Hard redesign: lagpax's own API (`LocalGP`/`Emulator`/`Prior`/`Param`), theta-or-lengthscale priors, laGP-isms dropped | `18691de` |
+| 9 | From-scratch rewrite of the internals: pytree dataclasses throughout, self-documenting names, full type hints | branch `ccr-7f9aed99-rlk3k1` |
 
 **Explicitly not shipping**, do not implement even if it looks easy: `aGP.parallel` (XLA decides
 parallelism), `randLine` (a visual diagnostic), `optim.auglag`/`optim.efi` (constrained blackbox
@@ -215,6 +216,33 @@ not taken. Keep the 1-core row; it is the only way such a node announces itself.
 - [ ] Re-measure the fit intercept (the 1.06s) with vlse.
 - [ ] Multi-seed reruns: every GPU number is single-seed.
 - [ ] A first submission of `bench/cpu.sbatch`, committed but never run.
+
+### Phase 9: the from-scratch rewrite
+
+Every module was rewritten rather than renamed, around three rules: JAX's own idioms (pure functions
+over pytree dataclasses, no NamedTuple `__new__` overrides, no hand-built static configs), names
+that say what a thing is so the code needs no comments, and type hints on everything.
+
+| phase 8 | phase 9 |
+| --- | --- |
+| `GP(X, y, theta, nugget)` NamedTuple with a `__new__` override | `GaussianProcess.from_data(inputs, outputs, Hyperparameters(squared_lengthscales, nugget))`, a pytree dataclass |
+| `Ki`, `ldetK`, `phi`, `b`, `Kfi`, `mask`, `dof` | `inverse_correlation`, `log_det_correlation`, `residual_sum_of_squares`, `trend_coefficients`, `inverse_trend_information`, `active`, `degrees_of_freedom` |
+| `Param(init, ..., gamma=(a, b))` | `Param(initial, ..., prior=GammaPrior(shape, rate))` |
+| `Prior(theta=...)`, `space="lengthscale"` | `Prior(squared_lengthscale=...)`, `kernel_space="lengthscale"` |
+| `ALC`, `NN`, `IECI(fmin, w, nugget)`, `Custom` | `ActiveLearningCohn`, `NearestNeighbor`, `IntegratedExpectedConditionalImprovement(best_observed, weights, include_nugget)`, `CustomCriterion` |
+| `Exhaustive`, `Ray(numrays, iters)`, `Continuous(numstart, maxit)` | `ExhaustiveSearch`, `RaySearch(rays, golden_section_steps)`, `ContinuousSearch(starts, max_iterations)` |
+| `LocalGP(init, maxiter)`, `emu(Xnew, batch=)`, `emu.local(Xref, full_cov=)` | `LocalGP(initial_neighbors, max_iterations)`, `emulator(new_inputs, batch_size=)`, `emulator.predict_local(references, full_covariance=)` |
+| `FitInfo(theta, ...)`, `fit_kernel`/`fit_both` | `FitResult(squared_lengthscales, ...)`, `fit_squared_lengthscales`/`fit_jointly` |
+| `implicit_argmin`, `bracketed_newton`, `r_ftol` | `with_implicit_gradient`, `newton_maximize_on_interval`, `R_OPTIM_RELATIVE_TOLERANCE` |
+
+- **Numerically the same program.** Against a snapshot written by the phase-8 code in the same
+  container, 80/124 arrays are bit-identical and the rest move by at most 2e-11. The trail starts
+  at the default Gamma rate, now `gammaincinv(a, mass)` instead of laGP's
+  `Igamma.inv(a, mass * gamma(a))` — one ulp apart (`prior.*.d.ab`, 1e-15), which nudges the MAP
+  objective and so the fitted squared lengthscales and everything downstream.
+- **Tests did not move a tolerance.** Every module was ported to the new names and passes as
+  before; the `Igamma.inv` test became a parity test of `GammaPrior.with_mass_below`, and the
+  analytic-derivative test of the kernel went with `dcorrelation` (autodiff covers it).
 
 ### Phase 8: the hard redesign
 

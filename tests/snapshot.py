@@ -17,8 +17,9 @@ jax.config.update("jax_enable_x64", True)
 import numpy as np
 
 import lagpax as lagp
-from lagpax.fit import fit
-from lagpax.prior import Param, Prior, darg, garg
+from lagpax import GammaPrior, GaussianProcess, Hyperparameters, Param, Prior
+from lagpax.fitting import fit_hyperparameters
+from lagpax.priors import default_nugget, default_squared_lengthscale
 
 START, END = 6, 30
 D_SMALL = 1e-3
@@ -44,22 +45,25 @@ def collect() -> dict[str, np.ndarray]:
     for name in ("small", "medium", "noisy"):
         X, Z = DESIGNS[name]
         d = np.linspace(0.3, 1.1, X.shape[1])
-        gp = lagp.GP(X, Z, d, D_SMALL)
+        gp = GaussianProcess.from_data(X, Z, Hyperparameters(d, D_SMALL))
         XX = X[:6] + 0.05
 
-        out[f"gp.{name}.phi"] = np.asarray(gp.phi, float)
-        out[f"gp.{name}.ldetK"] = np.asarray(gp.ldetK, float)
+        out[f"gp.{name}.phi"] = np.asarray(gp.residual_sum_of_squares, float)
+        out[f"gp.{name}.ldetK"] = np.asarray(gp.log_det_correlation, float)
         out[f"gp.{name}.llik"] = np.asarray(gp.log_likelihood(), float)
-        gammas = Prior(theta=Param(gamma=(1.5, 3.9)), nugget=Param(gamma=(2.0, 5.0)))
+        gammas = Prior(
+            squared_lengthscale=Param(prior=GammaPrior(1.5, 3.9)),
+            nugget=Param(prior=GammaPrior(2.0, 5.0)),
+        )
         out[f"gp.{name}.llik_prior"] = np.asarray(gp.log_likelihood(gammas), float)
 
         lite = gp.predict(XX)
-        full = gp.predict(XX, full_cov=True)
-        nonug = gp.predict(XX, nugget=False)
+        full = gp.predict(XX, full_covariance=True)
+        nonug = gp.predict(XX, include_nugget=False)
         for key, val in [
             ("lite.mean", lite.mean),
             ("lite.variance", lite.variance),
-            ("lite.df", lite.dof),
+            ("lite.df", lite.degrees_of_freedom),
             ("lite.llik", lite.log_likelihood),
             ("full.mean", full.mean),
             ("full.covariance", full.covariance),
@@ -68,47 +72,55 @@ def collect() -> dict[str, np.ndarray]:
             out[f"pred.{name}.{key}"] = np.asarray(val, float)
 
         out[f"alc.{name}"] = np.asarray(
-            lagp.alc(gp, X[:10] + 0.01, X[10:14] + 0.02), float
+            lagp.ActiveLearningCohn()(gp, X[:10] + 0.01, X[10:14] + 0.02), float
         )
 
-        prior = Prior(theta=darg(None, X), nugget=garg(1 / 10000, Z))
-        for who, arg in (("d", prior.theta), ("g", prior.nugget)):
-            out[f"prior.{name}.{who}.start"] = np.atleast_1d(np.asarray(arg.init, float))
+        prior = Prior(
+            squared_lengthscale=default_squared_lengthscale(None, X),
+            nugget=default_nugget(1 / 10000, Z),
+        )
+        for who, arg in (("d", prior.squared_lengthscale), ("g", prior.nugget)):
+            shape_rate = (
+                (0.0, 0.0) if arg.prior is None else (arg.prior.shape, arg.prior.rate)
+            )
+            out[f"prior.{name}.{who}.start"] = np.atleast_1d(
+                np.asarray(arg.initial, float)
+            )
             out[f"prior.{name}.{who}.min"] = np.asarray(arg.lower, float)
             out[f"prior.{name}.{who}.max"] = np.asarray(arg.upper, float)
-            out[f"prior.{name}.{who}.ab"] = np.asarray(arg.gamma, float)
+            out[f"prior.{name}.{who}.ab"] = np.asarray(shape_rate, float)
             out[f"prior.{name}.{who}.estimate"] = np.asarray(float(arg.learn))
 
-        _, fitted = fit(gp, prior)
-        out[f"fit.{name}.d"] = np.asarray(fitted.theta, float)
+        _, fitted = fit_hyperparameters(gp, prior)
+        out[f"fit.{name}.d"] = np.asarray(fitted.squared_lengthscales, float)
         out[f"fit.{name}.converged"] = np.asarray(fitted.converged, float)
 
     for name in ("medium", "wide"):
         X, Z = DESIGNS[name]
         XX = X[:8] + 0.015
-        emu = lagp.LocalGP(init=START, neighbors=END).fit(X, Z)
+        emu = lagp.LocalGP(initial_neighbors=START, neighbors=END).fit(X, Z)
         for crit in ("nn", "alc"):
             use = emu._replace(model=emu.model.replace(criterion=crit))
-            a = use(XX, batch=4)
+            a = use(XX, batch_size=4)
             out[f"agp.{name}.{crit}.mean"] = np.asarray(a.mean, float)
             out[f"agp.{name}.{crit}.var"] = np.asarray(a.variance, float)
             out[f"agp.{name}.{crit}.llik"] = np.asarray(a.log_likelihood, float)
             out[f"agp.{name}.{crit}.Xi"] = np.asarray(a.neighbors, float)
-            out[f"agp.{name}.{crit}.d"] = np.asarray(a.fit.theta, float)
+            out[f"agp.{name}.{crit}.d"] = np.asarray(a.fit.squared_lengthscales, float)
 
-            q = use.local(X[:1] + 0.01)
+            q = use.predict_local(X[:1] + 0.01)
             out[f"lagp.{name}.{crit}.mean"] = np.asarray(q.mean, float)
             out[f"lagp.{name}.{crit}.variance"] = np.asarray(q.variance, float)
-            out[f"lagp.{name}.{crit}.df"] = np.asarray(q.dof, float)
+            out[f"lagp.{name}.{crit}.df"] = np.asarray(q.degrees_of_freedom, float)
             out[f"lagp.{name}.{crit}.llik"] = np.asarray(q.log_likelihood, float)
             out[f"lagp.{name}.{crit}.Xi"] = np.asarray(q.neighbors, float)
-            out[f"lagp.{name}.{crit}.d"] = np.asarray(q.fit.theta, float)
+            out[f"lagp.{name}.{crit}.d"] = np.asarray(q.fit.squared_lengthscales, float)
 
-        r = emu.refine(XX, passes=("nn", "alc"), batch=4)
+        r = emu.refine(XX, passes=("nn", "alc"), batch_size=4)
         out[f"refine.{name}.mean"] = np.asarray(r.mean, float)
         out[f"refine.{name}.var"] = np.asarray(r.variance, float)
         out[f"refine.{name}.Xi"] = np.asarray(r.neighbors, float)
-        out[f"refine.{name}.d"] = np.asarray(r.fit.theta, float)
+        out[f"refine.{name}.d"] = np.asarray(r.fit.squared_lengthscales, float)
 
     return out
 

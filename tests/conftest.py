@@ -51,10 +51,11 @@ class RlaGP:
 
     def darg_list(self, d) -> str:
         """R expression for a darg/garg list from a Param, so both sides get identical settings."""
-        start = ",".join(repr(float(v)) for v in np.atleast_1d(d.init))
+        start = ",".join(repr(float(v)) for v in np.atleast_1d(d.initial))
+        shape, rate = (0.0, 0.0) if d.prior is None else (d.prior.shape, d.prior.rate)
         return (
             f"list(start=c({start}), min={d.lower!r}, max={d.upper!r}, "
-            f"mle={'TRUE' if d.learn else 'FALSE'}, ab=c({d.gamma[0]!r},{d.gamma[1]!r}))"
+            f"mle={'TRUE' if d.learn else 'FALSE'}, ab=c({shape!r},{rate!r}))"
         )
 
 

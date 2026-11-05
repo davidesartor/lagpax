@@ -13,20 +13,23 @@ import jax
 import jax.numpy as jnp
 
 import lagpax as lagp
-from lagpax.fit import fit_kernel, fit_nugget
-from lagpax.gp import GP, llik_nugget, llik_theta
-from lagpax.model import LocalGP
-from lagpax.optim import implicit_argmin
-from lagpax.prior import Param, Prior
+from helpers import make_gp
+from lagpax.fitting import fit_nugget, fit_squared_lengthscales
+from lagpax.gaussian_process import Hyperparameters, log_likelihood_at
+from lagpax.local import LocalGP
+from lagpax.optimize import with_implicit_gradient
+from lagpax.priors import Param, Prior
 
 
 def _bounds(lo, hi, which):
     """A prior that learns one hyperparameter in [lo, hi], with no Gamma prior."""
-    box = Param(lower=lo, upper=hi, gamma=(0.0, 0.0), learn=True)
-    fixed = Param(lower=1e-8, upper=1.0, gamma=(0.0, 0.0), learn=False)
-    if which == "theta":
-        return Prior(theta=box, nugget=fixed)
-    return Prior(theta=Param(lower=1e-3, upper=10.0, learn=False), nugget=box)
+    box = Param(lower=lo, upper=hi, learn=True)
+    fixed = Param(lower=1e-8, upper=1.0, learn=False)
+    if which == "squared_lengthscale":
+        return Prior(squared_lengthscale=box, nugget=fixed)
+    return Prior(
+        squared_lengthscale=Param(lower=1e-3, upper=10.0, learn=False), nugget=box
+    )
 
 
 def _quadratic(p, A, M):
@@ -44,14 +47,14 @@ def quad():
     return A, M, jnp.asarray(rng.random(3))
 
 
-def test_implicit_argmin_reproduces_a_closed_form_jacobian(quad):
+def test_implicit_gradient_reproduces_a_closed_form_jacobian(quad):
     """A quadratic's argmin is A^-1 M p, so the implicit gradient has an exact target."""
     A, M, p = quad
     lo, hi = jnp.full(4, -1e3), jnp.full(4, 1e3)
 
     def solved(p):
         fun = _quadratic(p, A, M)
-        return implicit_argmin(fun, jnp.linalg.solve(A, M @ p), lo, hi)
+        return with_implicit_gradient(fun, jnp.linalg.solve(A, M @ p), lo, hi)
 
     np.testing.assert_allclose(
         np.asarray(jax.jacobian(solved)(p)),
@@ -63,12 +66,12 @@ def test_implicit_argmin_reproduces_a_closed_form_jacobian(quad):
     )
 
 
-def test_implicit_argmin_leaves_the_value_bit_identical(quad):
+def test_implicit_gradient_leaves_the_value_bit_identical(quad):
     """The solver's answer must survive untouched: the parity suite compares values."""
     A, M, p = quad
     lo, hi = jnp.full(4, -1e3), jnp.full(4, 1e3)
     x = jnp.asarray([0.11, -0.37, 2.5, 0.04])
-    got = implicit_argmin(_quadratic(p, A, M), x, lo, hi)
+    got = with_implicit_gradient(_quadratic(p, A, M), x, lo, hi)
     np.testing.assert_array_equal(np.asarray(got), np.asarray(x))
 
 
@@ -80,7 +83,7 @@ def test_a_coordinate_on_a_bound_has_exactly_zero_gradient(quad):
 
     def solved(p):
         x = jnp.clip(jnp.linalg.solve(A, M @ p), lo, hi)
-        return implicit_argmin(_quadratic(p, A, M), x, lo, hi)
+        return with_implicit_gradient(_quadratic(p, A, M), x, lo, hi)
 
     jac = np.asarray(jax.jacobian(solved)(p))
     assert np.all(jac[1] == 0.0)
@@ -97,8 +100,11 @@ def _exact_argmin_d(X, Z, d0, g, warm):
     """
     from scipy.optimize import root
 
-    gp = GP(jnp.asarray(X), jnp.asarray(Z), d0, g)
-    grad = jax.jit(jax.grad(lambda d: -llik_theta(gp, d)))
+    gp = make_gp(jnp.asarray(X), jnp.asarray(Z), d0, g)
+    nugget = gp.hyperparameters.nugget
+    grad = jax.jit(
+        jax.grad(lambda d: -log_likelihood_at(gp, Hyperparameters(d, nugget)))
+    )
     sol = root(lambda d: np.asarray(grad(jnp.asarray(d))), warm, tol=1e-13)
 
     # hybr reports failure once it stops improving, which at this tolerance means it has
@@ -108,15 +114,17 @@ def _exact_argmin_d(X, Z, d0, g, warm):
 
 
 def test_lengthscale_gradient_matches_an_exactly_solved_argmin(noisy):
-    """d(theta*)/dy through `fit_kernel`, against a differenced machine-precision argmin."""
+    """d(s*)/dy through `fit_squared_lengthscales`, against a machine-precision argmin."""
     X, Z = noisy
     X, Z = X[:60], Z[:60]
     d0, g = jnp.full(3, 0.5), 1e-2
     lo, hi = 1e-3, 10.0
 
-    prior = _bounds(lo, hi, "theta")
+    prior = _bounds(lo, hi, "squared_lengthscale")
     fitted = lambda Zv: (
-        fit_kernel(GP(jnp.asarray(X), Zv, d0, g), prior, maxiter=200)[1].theta
+        fit_squared_lengthscales(
+            make_gp(jnp.asarray(X), Zv, d0, g), prior, max_iterations=200
+        )[1].squared_lengthscales
     )
     got = np.asarray(jax.jacobian(fitted)(jnp.asarray(Z)))
 
@@ -147,13 +155,18 @@ def test_nugget_gradient_matches_finite_differences(noisy):
 
     prior = _bounds(lo, hi, "nugget")
     fitted = lambda Zv: (
-        fit_nugget(GP(jnp.asarray(X), Zv, d0, g0), prior, maxiter=200)[1].nugget
+        fit_nugget(make_gp(jnp.asarray(X), Zv, d0, g0), prior, max_iterations=200)[
+            1
+        ].nugget
     )
     got = np.asarray(jax.grad(fitted)(jnp.asarray(Z)))
 
     def exact(Znp):
-        gp = GP(jnp.asarray(X), jnp.asarray(Znp), d0, g0)
-        dg = jax.jit(jax.grad(lambda g: -llik_nugget(gp, g)))
+        gp = make_gp(jnp.asarray(X), jnp.asarray(Znp), d0, g0)
+        squared = gp.hyperparameters.squared_lengthscales
+        dg = jax.jit(
+            jax.grad(lambda g: -log_likelihood_at(gp, Hyperparameters(squared, g)))
+        )
         return brentq(lambda g: float(dg(g)), lo, hi, xtol=1e-15, rtol=1e-15)
 
     step = 1e-4
@@ -168,12 +181,12 @@ def test_nugget_gradient_matches_finite_differences(noisy):
 def test_gradient_is_zero_when_the_nugget_is_pinned(small):
     """The noiseless case pins g at its lower bound, and a bound carries no gradient."""
     X, Z = small
-    gp = GP(jnp.asarray(X), jnp.asarray(Z), jnp.full(3, 0.5), 1e-2)
+    gp = make_gp(jnp.asarray(X), jnp.asarray(Z), jnp.full(3, 0.5), 1e-2)
     lo, hi = 1e-8, 1.0
 
     prior = _bounds(lo, hi, "nugget")
     fitted = lambda Zv: (
-        fit_nugget(GP(jnp.asarray(X), Zv, jnp.full(3, 0.5), 1e-2), prior)[1].nugget
+        fit_nugget(make_gp(jnp.asarray(X), Zv, jnp.full(3, 0.5), 1e-2), prior)[1].nugget
     )
     assert float(fitted(jnp.asarray(Z))) == pytest.approx(lo, rel=1e-12)
     np.testing.assert_array_equal(np.asarray(jax.grad(fitted)(jnp.asarray(Z))), 0.0)
@@ -189,10 +202,10 @@ def test_the_whole_scheme_runs_under_jit(medium):
     X, Z = medium
     XX = np.random.default_rng(11).random((5, X.shape[1]))
     prior = Prior.from_data(X, Z, nugget=Param(learn=True))
-    model = LocalGP(init=6, neighbors=20)
+    model = LocalGP(initial_neighbors=6, neighbors=20)
 
     def run(X, Z, XX):
-        return model.fit(X, Z, prior=prior)(XX, batch=None).mean
+        return model.fit(X, Z, prior=prior)(XX, batch_size=None).mean
 
     plain = np.asarray(run(jnp.asarray(X), jnp.asarray(Z), jnp.asarray(XX)))
     compiled = np.asarray(jax.jit(run)(jnp.asarray(X), jnp.asarray(Z), jnp.asarray(XX)))
@@ -208,10 +221,10 @@ def test_the_scheme_vmaps_over_datasets(medium):
     rng = np.random.default_rng(12)
     XX = rng.random((3, X.shape[1]))
     prior = Prior.from_data(X, Z)
-    model = LocalGP(init=6, neighbors=20)
+    model = LocalGP(initial_neighbors=6, neighbors=20)
 
     Zs = jnp.stack([jnp.asarray(Z), jnp.asarray(Z + 0.5 * rng.standard_normal(len(Z)))])
-    run = lambda Zv: model.fit(X, Zv, prior=prior)(XX, batch=None)
+    run = lambda Zv: model.fit(X, Zv, prior=prior)(XX, batch_size=None)
     batched = jax.vmap(run)(Zs)
 
     # `vmap` rewrites the arithmetic and a batched `while_loop` shares its trip count, so
@@ -242,9 +255,9 @@ def test_gradients_reach_the_data_through_the_whole_scheme(noisy):
     """
     X, Z = noisy
     XX = np.random.default_rng(13).random((2, X.shape[1]))
-    emu = _emu(X, Z, init=6, neighbors=20)
+    emu = _emu(X, Z, initial_neighbors=6, neighbors=20)
 
-    f = lambda Zv: jnp.sum(emu._replace(y=Zv)(XX, batch=None).mean)
+    f = lambda Zv: jnp.sum(emu._replace(outputs=Zv)(XX, batch_size=None).mean)
     Zj = jnp.asarray(Z)
     got = np.asarray(jax.grad(f)(Zj))
     assert np.count_nonzero(got) > 10
@@ -262,9 +275,9 @@ def test_gradients_reach_the_design_locations(noisy):
     """d(prediction)/dX as well as dZ: the design enters through the covariance."""
     X, Z = noisy
     XX = np.random.default_rng(14).random((2, X.shape[1]))
-    emu = _emu(X, Z, init=6, neighbors=20)
+    emu = _emu(X, Z, initial_neighbors=6, neighbors=20)
 
-    f = lambda Xv: jnp.sum(emu._replace(X=Xv)(XX, batch=None).mean)
+    f = lambda Xv: jnp.sum(emu._replace(inputs=Xv)(XX, batch_size=None).mean)
     Xj = jnp.asarray(X)
     got = np.asarray(jax.grad(f)(Xj))
     assert np.count_nonzero(got) > 10
@@ -281,9 +294,9 @@ def test_refine_is_differentiable(medium):
     """`refine` unrolls its passes at trace time, so the gradient survives them."""
     X, Z = medium
     XX = np.random.default_rng(15).random((2, X.shape[1]))
-    emu = _emu(X, Z, init=6, neighbors=20)
+    emu = _emu(X, Z, initial_neighbors=6, neighbors=20)
 
-    f = lambda Zv: jnp.sum(emu._replace(y=Zv).refine(XX, batch=None).mean)
+    f = lambda Zv: jnp.sum(emu._replace(outputs=Zv).refine(XX, batch_size=None).mean)
     got = np.asarray(jax.grad(f)(jnp.asarray(Z)))
     assert np.all(np.isfinite(got))
     assert np.count_nonzero(got) > 10

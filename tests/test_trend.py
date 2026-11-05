@@ -11,22 +11,23 @@ import jax
 import jax.numpy as jnp
 
 import lagpax as lagp
-from lagpax.gp import trend_basis
+from helpers import make_gp
+from lagpax.gaussian_process import trend_basis
 
 D = np.array([0.3, 0.7, 1.1])
 G = 1e-6
 
 
 def _gp(X, Z, trend, d=D, mask=None):
-    return lagp.GP(jnp.asarray(X), jnp.asarray(Z), jnp.asarray(d), G, mask, trend=trend)
+    return make_gp(jnp.asarray(X), jnp.asarray(Z), jnp.asarray(d), G, mask, trend=trend)
 
 
 def test_zero_trend_is_the_untrended_model(small):
     """The parity default has to stay the code path the whole suite validates."""
     X, Z = small
-    plain, zero = _gp(X, Z, "zero"), lagp.GP(jnp.asarray(X), jnp.asarray(Z), D, G)
-    assert plain.p == 0
-    assert float(plain.dof) == float(zero.dof) == len(X)
+    plain, zero = _gp(X, Z, "zero"), make_gp(jnp.asarray(X), jnp.asarray(Z), D, G)
+    assert plain.trend_size == 0
+    assert float(plain.degrees_of_freedom) == float(zero.degrees_of_freedom) == len(X)
 
     XX = X[:5] + 0.05
     np.testing.assert_array_equal(
@@ -41,9 +42,9 @@ def test_zero_trend_is_the_untrended_model(small):
 def test_degrees_of_freedom_drop_one_per_coefficient(small, trend, p):
     X, Z = small
     gp = _gp(X, Z, trend)
-    assert gp.p == p
-    assert float(gp.dof) == len(X) - p
-    assert float(gp.predict(X[:3] + 0.05).dof) == len(X) - p
+    assert gp.trend_size == p
+    assert float(gp.degrees_of_freedom) == len(X) - p
+    assert float(gp.predict(X[:3] + 0.05).degrees_of_freedom) == len(X) - p
 
 
 def test_constant_trend_coefficient_is_the_gls_mean(small):
@@ -55,10 +56,10 @@ def test_constant_trend_coefficient_is_the_gls_mean(small):
     X, Z = small
     gp = _gp(X, Z, "constant")
 
-    Ki = np.asarray(gp.Ki)
+    Ki = np.asarray(gp.inverse_correlation)
     ones = np.ones(len(Z))
     gls = float((ones @ Ki @ Z) / (ones @ Ki @ ones))
-    assert float(gp.b[0]) == pytest.approx(gls, rel=1e-10)
+    assert float(gp.trend_coefficients[0]) == pytest.approx(gls, rel=1e-10)
 
     far = np.full((3, X.shape[1]), 30.0)
     np.testing.assert_allclose(np.asarray(gp.predict(far).mean), gls, rtol=1e-10)
@@ -88,11 +89,11 @@ def test_mask_matches_a_smaller_design_with_a_trend(small):
         padded = _gp(X, Z, trend, mask=mask)
         exact = _gp(X[:k], Z[:k], trend)
 
-        assert float(padded.dof) == float(exact.dof)
+        assert float(padded.degrees_of_freedom) == float(exact.degrees_of_freedom)
         np.testing.assert_allclose(
-            np.asarray(padded.b), np.asarray(exact.b), rtol=1e-10
+            np.asarray(padded.trend_coefficients), np.asarray(exact.trend_coefficients), rtol=1e-10
         )
-        assert float(padded.phi) == pytest.approx(float(exact.phi), rel=1e-10)
+        assert float(padded.residual_sum_of_squares) == pytest.approx(float(exact.residual_sum_of_squares), rel=1e-10)
         assert float(padded.log_likelihood()) == pytest.approx(
             float(exact.log_likelihood()), rel=1e-10
         )
@@ -124,9 +125,9 @@ def _coverage(trend, reps=200, seed=2):
         Z = f(x) + 0.05 * rng.standard_normal(len(x))
 
         xx = np.array([[x[-1, 0] + 0.4]])
-        gp = lagp.GP(x, Z, np.array([0.05]), 1e-4, trend=trend)
+        gp = make_gp(x, Z, np.array([0.05]), 1e-4, trend=trend)
         pred = gp.predict(xx)
-        df = float(pred.dof)
+        df = float(pred.degrees_of_freedom)
         scale = float(pred.variance[0]) * (df - 2) / df  # the Student-t scale, squared
         half = student_t.ppf(0.95, df) * np.sqrt(scale)
         hits += abs(float(pred.mean[0]) - float(f(xx)[0])) <= half
@@ -172,13 +173,13 @@ def test_the_local_model_accepts_a_trend(medium):
     """`trend` is static config, so it has to reach the compiled core intact."""
     X, Z = medium
     XX = np.random.default_rng(8).random((5, X.shape[1]))
-    model = lagp.LocalGP(init=6, neighbors=20)
-    zero = model.fit(X, Z)(XX, batch=None)
+    model = lagp.LocalGP(initial_neighbors=6, neighbors=20)
+    zero = model.fit(X, Z)(XX, batch_size=None)
     for trend, p in (("constant", 1), ("linear", X.shape[1] + 1)):
-        out = model.replace(trend=trend).fit(X, Z)(XX, batch=None)
-        np.testing.assert_array_equal(np.asarray(out.dof), 20 - p)
+        out = model.replace(trend=trend).fit(X, Z)(XX, batch_size=None)
+        np.testing.assert_array_equal(np.asarray(out.degrees_of_freedom), 20 - p)
         assert np.all(np.isfinite(np.asarray(out.mean)))
-    np.testing.assert_array_equal(np.asarray(zero.dof), 20)
+    np.testing.assert_array_equal(np.asarray(zero.degrees_of_freedom), 20)
 
 
 def test_unknown_trend_is_rejected(small):

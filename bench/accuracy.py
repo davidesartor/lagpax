@@ -6,7 +6,7 @@ import pandas as pd
 
 from bench.common import BENCH_DIR, RlaGP, design
 import lagpax as lagp
-from lagpax.prior import Prior, darg, garg
+from lagpax.priors import Prior, default_nugget, default_squared_lengthscale
 
 CASES = [
     dict(n=2000, nn=100, m=2),
@@ -29,10 +29,14 @@ def run() -> pd.DataFrame:
         for method in ("nn", "alc"):
             for seed in SEEDS:
                 X, Z, XX = design(seed=seed, **case)
-                # both sides get the same prior; darg's own subsample is RNG-dependent
-                d = darg(None, X, key=jax.random.key(seed))
-                prior = Prior(theta=d, nugget=garg(1 / 10000, Z))
-                model = lagp.LocalGP(init=START, neighbors=END, criterion=method)
+                # both sides get the same prior; the default's own subsample is RNG-dependent
+                d = default_squared_lengthscale(None, X, key=jax.random.key(seed))
+                prior = Prior(
+                    squared_lengthscale=d, nugget=default_nugget(1 / 10000, Z)
+                )
+                model = lagp.LocalGP(
+                    initial_neighbors=START, neighbors=END, criterion=method
+                )
                 ours = model.fit(X, Z, prior=prior)(XX)
                 mean, var = R.agp(X, Z, XX, START, END, method, d=d)
 

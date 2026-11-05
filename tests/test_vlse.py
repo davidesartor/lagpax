@@ -22,8 +22,10 @@ import pytest
 import vlse
 
 import lagpax as lagp
-from lagpax.fit import fit_both
-from lagpax.prior import Param, Prior, darg, garg
+from helpers import make_gp
+from lagpax.fitting import fit_jointly
+from helpers import lagp_prior
+from lagpax.priors import Prior, default_nugget, default_squared_lengthscale
 
 SURFACES = {
     "Branin": lambda: vlse.Branin(normalized=True),
@@ -55,10 +57,8 @@ def _sample(f, n: int, seed: int):
 
 
 def _llik(X, Z, d, g):
-    gp = lagp.GP(jnp.asarray(X), jnp.asarray(Z), jnp.asarray(d), float(g))
-    return float(
-        gp.log_likelihood(Prior(theta=Param(gamma=DAB), nugget=Param(gamma=GAB)))
-    )
+    gp = make_gp(jnp.asarray(X), jnp.asarray(Z), jnp.asarray(d), float(g))
+    return float(gp.log_likelihood(lagp_prior(DAB, GAB)))
 
 
 @pytest.mark.parametrize("name", list(SURFACES))
@@ -67,12 +67,9 @@ def test_joint_fit_on_test_functions(R, name):
     m = X.shape[1]
     d0, g0 = np.full(m, 0.5), 1e-3
 
-    gp = lagp.GP(jnp.asarray(X), jnp.asarray(Z), jnp.asarray(d0), g0)
-    prior = Prior(
-        theta=Param(lower=DRANGE[0], upper=DRANGE[1], gamma=DAB, learn=True),
-        nugget=Param(lower=GRANGE[0], upper=GRANGE[1], gamma=GAB, learn=True),
-    )
-    _, ours = fit_both(gp, prior)
+    gp = make_gp(jnp.asarray(X), jnp.asarray(Z), jnp.asarray(d0), g0)
+    prior = lagp_prior(DAB, GAB, DRANGE, GRANGE)
+    _, ours = fit_jointly(gp, prior)
     want = np.asarray(
         R(
             "gpi <- newGPsep(X, Z, d=d, g=g, dK=TRUE); "
@@ -90,9 +87,13 @@ def test_joint_fit_on_test_functions(R, name):
     ).ravel()
 
     theirs = _llik(X, Z, want[:m], want[m])
-    assert _llik(X, Z, ours.theta, ours.nugget) >= theirs - 1e-5 * max(1.0, abs(theirs))
+    assert _llik(X, Z, ours.squared_lengthscales, ours.nugget) >= theirs - 1e-5 * max(
+        1.0, abs(theirs)
+    )
     if name in UNIMODAL_FIT:
-        np.testing.assert_allclose(np.asarray(ours.theta), want[:m], rtol=1e-3)
+        np.testing.assert_allclose(
+            np.asarray(ours.squared_lengthscales), want[:m], rtol=1e-3
+        )
         assert float(ours.nugget) == pytest.approx(want[m], rel=1e-3)
 
 
@@ -104,9 +105,9 @@ def test_local_model_on_test_functions(R, name, criterion):
 
     # both sides get the same prior; under n=1000 darg does not subsample, but sharing it
     # keeps the comparison about the port and not about the prior
-    d = darg(None, X)
-    prior = Prior(theta=d, nugget=garg(1 / 10000, Z))
-    model = lagp.LocalGP(init=START, neighbors=END, criterion=criterion)
+    d = default_squared_lengthscale(None, X)
+    prior = Prior(squared_lengthscale=d, nugget=default_nugget(1 / 10000, Z))
+    model = lagp.LocalGP(initial_neighbors=START, neighbors=END, criterion=criterion)
     got = model.fit(X, Z, prior=prior)(XX)
     R(
         f"out <- aGPsep(X, Z, XX, start={START}, end={END}, d={R.darg_list(d)}, "

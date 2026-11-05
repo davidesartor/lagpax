@@ -5,8 +5,9 @@ import numpy as np
 import pytest
 
 import lagpax as lagp
-from lagpax.gp import dllik_nugget, dllik_theta
-from lagpax.prior import Param, Prior
+from helpers import make_gp
+from helpers import lagp_prior, log_likelihood_gradient
+from lagpax import Hyperparameters
 
 D = np.array([0.3, 0.7, 1.1])
 G = 1e-3
@@ -14,17 +15,17 @@ G = 1e-3
 NEWGP = "gpi <- newGPsep(X, Z, d=d, g=g[1], dK=TRUE)"
 
 
-def _prior(dab=(0.0, 0.0), gab=(0.0, 0.0)) -> Prior:
-    """A Prior carrying only the Gamma (shape, rate) pairs, which is all the likelihood reads."""
-    return Prior(theta=Param(gamma=dab), nugget=Param(gamma=gab))
+def _prior(dab=(0.0, 0.0), gab=(0.0, 0.0)):
+    """A prior carrying only the Gamma densities, which is all the likelihood reads."""
+    return lagp_prior(dab, gab)
 
 
 def _gp(small):
     X, Z = small
-    return lagp.GP(jnp.array(X), jnp.array(Z), jnp.array(D), G)
+    return make_gp(jnp.array(X), jnp.array(Z), jnp.array(D), G)
 
 
-def test_llik_matches_r(R, small):
+def test_log_likelihood_matches_r(R, small):
     X, Z = small
     got = float(_gp(small).log_likelihood())
     want = R.scalar(
@@ -37,7 +38,7 @@ def test_llik_matches_r(R, small):
     assert got == pytest.approx(want, rel=1e-12, abs=1e-12)
 
 
-def test_llik_with_priors_matches_r(R, small):
+def test_log_likelihood_with_priors_matches_r(R, small):
     X, Z = small
     dab, gab = np.array([1.5, 3.9]), np.array([2.0, 5.0])
     got = float(_gp(small).log_likelihood(_prior(tuple(dab), tuple(gab))))
@@ -53,17 +54,17 @@ def test_llik_with_priors_matches_r(R, small):
     assert got == pytest.approx(want, rel=1e-12, abs=1e-12)
 
 
-def test_llik_ignores_priors_when_ab_is_zero(R, small):
+def test_log_likelihood_ignores_priors_when_ab_is_zero(R, small):
     X, Z = small
     plain = float(_gp(small).log_likelihood())
     zeroed = float(_gp(small).log_likelihood(_prior()))
     assert plain == zeroed
 
 
-def test_dllik_theta_matches_r(R, small):
+def test_log_likelihood_gradient_matches_r(R, small):
     X, Z = small
     gp = _gp(small)
-    got = np.asarray(dllik_theta(gp, gp.theta))
+    got = np.asarray(log_likelihood_gradient(gp).squared_lengthscales)
     want = np.asarray(
         R(
             f"{NEWGP}; out <- laGP:::dllikGPsep(gpi, param='d'); deleteGPsep(gpi); out",
@@ -76,10 +77,10 @@ def test_dllik_theta_matches_r(R, small):
     np.testing.assert_allclose(got, want, rtol=1e-9, atol=1e-10)
 
 
-def test_dllik_theta_with_prior_matches_r(R, small):
+def test_log_likelihood_gradient_with_prior_matches_r(R, small):
     X, Z = small
     gp, ab = _gp(small), np.array([1.5, 3.9])
-    got = np.asarray(dllik_theta(gp, gp.theta, tuple(ab)))
+    got = np.asarray(log_likelihood_gradient(gp, lagp_prior(tuple(ab))).squared_lengthscales)
     want = np.asarray(
         R(
             f"{NEWGP}; out <- laGP:::dllikGPsep(gpi, param='d', ab=ab); deleteGPsep(gpi); out",
@@ -93,10 +94,10 @@ def test_dllik_theta_with_prior_matches_r(R, small):
     np.testing.assert_allclose(got, want, rtol=1e-9, atol=1e-10)
 
 
-def test_dllik_nugget_matches_r(R, small):
+def test_nugget_gradient_matches_r(R, small):
     X, Z = small
     gp = _gp(small)
-    got = float(dllik_nugget(gp, gp.nugget))
+    got = float(log_likelihood_gradient(gp).nugget)
     want = R.scalar(
         f"{NEWGP}; out <- laGP:::dllikGPsep(gpi, param='g'); deleteGPsep(gpi); out",
         X=X,
@@ -128,14 +129,14 @@ def test_pred_lite_matches_r(R, small):
     np.testing.assert_allclose(
         np.asarray(p.variance), want[nn : 2 * nn] * df / (df - 2), rtol=1e-8, atol=1e-11
     )
-    assert float(p.dof) == pytest.approx(df)
+    assert float(p.degrees_of_freedom) == pytest.approx(df)
     assert float(p.log_likelihood) == pytest.approx(want[2 * nn + 1], rel=1e-12)
 
 
 def test_pred_full_matches_r(R, small):
     X, Z = small
     XX = np.asarray(X[:6] + 0.05)
-    p = _gp(small).predict(jnp.array(XX), full_cov=True)
+    p = _gp(small).predict(jnp.array(XX), full_covariance=True)
     mean = np.asarray(
         R(
             f"{NEWGP}; out <- predGPsep(gpi, XX, lite=FALSE); deleteGPsep(gpi); out$mean",
@@ -157,7 +158,7 @@ def test_pred_full_matches_r(R, small):
         )
     )
     np.testing.assert_allclose(np.asarray(p.mean), mean, rtol=1e-11, atol=1e-12)
-    df = float(p.dof)
+    df = float(p.degrees_of_freedom)
     np.testing.assert_allclose(
         np.asarray(p.covariance), Sigma * df / (df - 2), rtol=1e-8, atol=1e-11
     )
@@ -171,7 +172,7 @@ def test_pred_without_nugget_uses_sdeps(small):
     gp = _gp(small)
     XX = jnp.array(X[:3] + 0.05)
     with_nug = gp.predict(XX).variance
-    without = gp.predict(XX, nugget=False).variance
+    without = gp.predict(XX, include_nugget=False).variance
     assert np.all(np.asarray(without) < np.asarray(with_nug))
 
 
@@ -180,12 +181,12 @@ def test_mask_matches_a_smaller_design(small):
     X, Z = small
     k = 25
     mask = np.arange(len(X)) < k
-    padded = lagp.GP(jnp.array(X), jnp.array(Z), jnp.array(D), G, jnp.array(mask))
-    exact = lagp.GP(jnp.array(X[:k]), jnp.array(Z[:k]), jnp.array(D), G)
+    padded = make_gp(jnp.array(X), jnp.array(Z), jnp.array(D), G, jnp.array(mask))
+    exact = make_gp(jnp.array(X[:k]), jnp.array(Z[:k]), jnp.array(D), G)
 
-    assert float(padded.n) == k
-    assert float(padded.phi) == pytest.approx(float(exact.phi), rel=1e-12)
-    assert float(padded.ldetK) == pytest.approx(float(exact.ldetK), rel=1e-12)
+    assert float(padded.active_count) == k
+    assert float(padded.residual_sum_of_squares) == pytest.approx(float(exact.residual_sum_of_squares), rel=1e-12)
+    assert float(padded.log_det_correlation) == pytest.approx(float(exact.log_det_correlation), rel=1e-12)
     assert float(padded.log_likelihood()) == pytest.approx(
         float(exact.log_likelihood()), rel=1e-12
     )
@@ -202,8 +203,8 @@ def test_mask_matches_a_smaller_design(small):
 
 def test_append_matches_rebuild(small):
     X, Z = small
-    gp = lagp.GP(jnp.array(X[:30]), jnp.array(Z[:30]), jnp.array(D), G)
-    appended = gp.append(jnp.array(X[30:]), jnp.array(Z[30:]))
+    gp = make_gp(jnp.array(X[:30]), jnp.array(Z[:30]), jnp.array(D), G)
+    appended = gp.with_observations(jnp.array(X[30:]), jnp.array(Z[30:]))
     rebuilt = _gp(small)
     assert float(appended.log_likelihood()) == pytest.approx(
         float(rebuilt.log_likelihood()), rel=1e-12
@@ -213,7 +214,7 @@ def test_append_matches_rebuild(small):
 def test_replace_rebuilds_cached_quantities(small):
     X, Z = small
     gp = _gp(small)
-    moved = gp.replace(theta=jnp.array([0.5, 0.5, 0.5]), nugget=1e-2)
-    direct = lagp.GP(jnp.array(X), jnp.array(Z), jnp.array([0.5, 0.5, 0.5]), 1e-2)
-    assert float(moved.phi) == pytest.approx(float(direct.phi), rel=1e-14)
-    assert float(moved.ldetK) == pytest.approx(float(direct.ldetK), rel=1e-14)
+    moved = gp.with_hyperparameters(Hyperparameters(jnp.array([0.5, 0.5, 0.5]), 1e-2))
+    direct = make_gp(jnp.array(X), jnp.array(Z), jnp.array([0.5, 0.5, 0.5]), 1e-2)
+    assert float(moved.residual_sum_of_squares) == pytest.approx(float(direct.residual_sum_of_squares), rel=1e-14)
+    assert float(moved.log_det_correlation) == pytest.approx(float(direct.log_det_correlation), rel=1e-14)

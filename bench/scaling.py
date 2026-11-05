@@ -29,10 +29,10 @@ def run(ns, searches, out="scaling.csv") -> pd.DataFrame:
         truth = ackley(XX)
         for search in searches:
             model = lagp.LocalGP(
-                init=START, neighbors=END, search=search, candidates=n
+                initial_neighbors=START, neighbors=END, search=search, candidates=n
             )
             fn = lambda: jax.block_until_ready(
-                model.fit(X, Z, key=jax.random.key(0))(XX, batch=NN)
+                model.fit(X, Z, key=jax.random.key(0))(XX, batch_size=NN)
             )
             seconds, pred = timeit(fn)
             rows.append(

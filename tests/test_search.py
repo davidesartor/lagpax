@@ -14,9 +14,11 @@ import jax
 import jax.numpy as jnp
 
 import lagpax as lagp
+from helpers import make_gp
 from lagpax import search as searches
-from lagpax.criteria import alc
-from lagpax.optim import r_ftol
+from lagpax.optimize import R_OPTIM_RELATIVE_TOLERANCE
+
+alc = lagp.ActiveLearningCohn()
 from vlse.optim import minimise
 
 START, END = 6, 30
@@ -24,23 +26,29 @@ START, END = 6, 30
 
 def _local(X, Z, Xref, **settings):
     """One local GP at Xref (laGPsep's job), with the shared design sizes."""
-    return lagp.LocalGP(init=START, neighbors=END, **settings).fit(X, Z).local(Xref)
+    return (
+        lagp.LocalGP(initial_neighbors=START, neighbors=END, **settings)
+        .fit(X, Z)
+        .predict_local(Xref)
+    )
 
 
-def _predict(X, Z, XX, batch=256, **settings):
+def _predict(X, Z, XX, batch_size=256, **settings):
     """One local GP per row of XX (aGPsep's job)."""
-    return lagp.LocalGP(init=START, neighbors=END, **settings).fit(X, Z)(
-        XX, batch=batch
+    return lagp.LocalGP(initial_neighbors=START, neighbors=END, **settings).fit(X, Z)(
+        XX, batch_size=batch_size
     )
 
 
 def _state(X, Z, Xref, ndesign=11):
     """A greedy loop frozen mid-flight: a small GP, and the rest as candidates."""
     prior = lagp.Prior.from_data(X, Z)
-    d0 = np.broadcast_to(np.asarray(prior.theta.init, float), (X.shape[1],))
-    g0 = float(prior.nugget.init)
+    d0 = np.broadcast_to(
+        np.asarray(prior.squared_lengthscale.initial, float), (X.shape[1],)
+    )
+    g0 = float(prior.nugget.initial)
     order = np.argsort(np.sum(np.square(X - Xref), axis=-1))
-    gp = lagp.GP(X[order[:ndesign]], Z[order[:ndesign]], d0, g0)
+    gp = make_gp(X[order[:ndesign]], Z[order[:ndesign]], d0, g0)
     Xcand = jnp.asarray(X[order[ndesign:]])
     rect = jnp.stack([Xcand.min(0), Xcand.max(0)])
     return gp, Xcand, rect, d0, g0
@@ -66,7 +74,7 @@ def test_ray_family_covers_every_candidate(medium):
         Xend = searches._ray_ends(Xref, Xcand, rect)
 
         zeros = jnp.zeros(len(Xcand))
-        _, val = searches._golden_max(
+        _, val = searches._golden_section_maximize(
             lambda s: alc(gp, Xcand + s[:, None] * (Xend - Xcand), Xref),
             zeros,
             zeros + 1.0,
@@ -90,9 +98,9 @@ def test_ray_degenerates_to_exhaustive(medium):
         taken = jnp.zeros(len(Xcand), bool)
         score = alc(gp, Xcand, Xref)
 
-        want = lagp.Exhaustive()(alc, gp, Xcand, Xref, taken, 0, rect)
+        want = lagp.ExhaustiveSearch()(alc, gp, Xcand, Xref, taken, 0, rect)
         for t in range(4):
-            got = lagp.Ray(numrays=len(Xcand), iters=40)(
+            got = lagp.RaySearch(rays=len(Xcand), golden_section_steps=40)(
                 alc, gp, Xcand, Xref, taken, jnp.asarray(t), rect
             )
             assert float(score[got]) >= 0.99 * float(score[want])
@@ -123,8 +131,8 @@ def test_alcoptgpsep_optima_are_stationary_for_our_gradient(R, medium):
         R(
             "gpi <- newGPsep(Xd, Zd, d=dd, g=gg, dK=TRUE);"
             " opt <- alcoptGPsep(gpi, Xref, Xstart, rect[1,], rect[2,])",
-            Xd=np.asarray(gp.X),
-            Zd=np.asarray(gp.y),
+            Xd=np.asarray(gp.inputs),
+            Zd=np.asarray(gp.outputs),
             dd=d0,
             gg=np.array([g0]),
             Xref=Xref,
@@ -140,7 +148,7 @@ def test_alcoptgpsep_optima_are_stationary_for_our_gradient(R, medium):
             jnp.asarray(want),
             (rect[0], rect[1]),
             tol=0.0,
-            ftol=r_ftol(jnp.float64),
+            ftol=R_OPTIM_RELATIVE_TOLERANCE,
         )
         got_alc = float(alc(gp, res.x[None], jnp.asarray(Xref))[0])
 
@@ -154,7 +162,7 @@ def test_alcoptgpsep_optima_are_stationary_for_our_gradient(R, medium):
 
 
 def _var_of(X, Z, idx, Xref, d0, g0):
-    return float(lagp.GP(X[idx], Z[idx], d0, g0).predict(Xref).variance[0])
+    return float(make_gp(X[idx], Z[idx], d0, g0).predict(Xref).variance[0])
 
 
 @pytest.mark.parametrize("search,method", [("ray", "alcray"), ("continuous", "alcopt")])
@@ -167,8 +175,10 @@ def test_search_designs_are_competitive_with_lagp(R, medium, search, method):
     """
     X, Z = medium
     prior = lagp.Prior.from_data(X, Z)
-    d0 = np.broadcast_to(np.asarray(prior.theta.init, float), (X.shape[1],))
-    g0 = float(prior.nugget.init)
+    d0 = np.broadcast_to(
+        np.asarray(prior.squared_lengthscale.initial, float), (X.shape[1],)
+    )
+    g0 = float(prior.nugget.initial)
 
     ratios = []
     for xref in np.random.default_rng(7).random((6, X.shape[1])):
@@ -202,10 +212,10 @@ def test_search_accuracy_tracks_exhaustive(medium):
     truth = np.sin(4 * XX[:, 0]) + np.cos(3 * XX[:, 1:3].sum(-1)) + 0.1 * XX.sum(-1)
     rmse = lambda p: float(np.sqrt(np.mean((np.asarray(p.mean) - truth) ** 2)))
 
-    nearest = rmse(_predict(X, Z, XX, batch=8, criterion="nn"))
-    full = rmse(_predict(X, Z, XX, batch=8))
+    nearest = rmse(_predict(X, Z, XX, batch_size=8, criterion="nn"))
+    full = rmse(_predict(X, Z, XX, batch_size=8))
     for search in ("ray", "continuous"):
-        got = rmse(_predict(X, Z, XX, batch=8, search=search))
+        got = rmse(_predict(X, Z, XX, batch_size=8, search=search))
         assert got <= 1.5 * full
         assert got <= nearest
 
@@ -225,8 +235,8 @@ def test_search_is_batch_invariant(medium, search):
     """Both searches have to survive `lax.map`, which is where fixed shapes get tested."""
     X, Z = medium
     XX = X[:8] + 0.015
-    a = _predict(X, Z, XX, batch=2, search=search)
-    b = _predict(X, Z, XX, batch=None, search=search)
+    a = _predict(X, Z, XX, batch_size=2, search=search)
+    b = _predict(X, Z, XX, batch_size=None, search=search)
     np.testing.assert_array_equal(np.asarray(a.neighbors), np.asarray(b.neighbors))
     np.testing.assert_allclose(np.asarray(a.mean), np.asarray(b.mean), rtol=1e-9)
 
@@ -259,6 +269,6 @@ def test_a_search_is_configured_by_its_settings(medium):
     """`criterion x search` is a grid: configuring a search must not need a new name."""
     X, Z = medium
     Xref = X[:1] + 0.01
-    out = _local(X, Z, Xref, search=lagp.Ray(numrays=8, iters=20))
+    out = _local(X, Z, Xref, search=lagp.RaySearch(rays=8, golden_section_steps=20))
     assert np.asarray(out.neighbors).shape == (END,)
     assert np.isfinite(float(out.mean[0]))

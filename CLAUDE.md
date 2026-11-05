@@ -78,80 +78,75 @@ the parity suite targets — check out the tag.
 
 ## src/lagpax
 
-The model is laGP's: correlation `exp(-sum_k (x_k - x'_k)^2 / theta_k)`, `nugget` on the diagonal,
-scale profiled out as `phi = resid' Ki resid`, Student-t predictive with `dof = n - p`. `p` is the
-trend basis width, 0 under the default `trend="zero"`, where `resid` is `y` and `dof` is `n`.
-`theta` is laGP's `d` (a squared lengthscale); `nugget` is laGP's `g`.
+Written to read without comments: descriptive names, type hints everywhere (jaxtyping shapes on
+every array), docstrings on what is public, and an inline comment only where a name cannot carry
+the reason. Keep it that way — prefer renaming over commenting.
 
-- `kernel.py` — `sqdist`, `correlation(X1, X2, theta)`, `correlation_matrix(X, theta, nugget)`,
-  `dcorrelation`. Data first, parameters last, everywhere.
-- `gp.py` — `GP(X, y, theta, nugget, mask=None, trend=)`, a NamedTuple caching `K`, `Ki`, `ldetK`,
-  `KiZ`, `phi`, plus `F`, `b`, `Kfi`, `ldetF` for the trend. `Ki` is materialized (not just a
-  Cholesky factor) because ALC needs it. `log_likelihood(prior)`, `predict(Xnew, full_cov=,
-  nugget=)`, `append`, `replace`. `_profile` is the fit's inner-loop objective — one Cholesky, two
-  triangular solves, no inverse. `_moments` returns the mean and the Student-t *scale*, which the
-  criteria need; `Prediction` only ever carries the variance (`scale * dof / (dof - 2)`). Internals
-  still say `d`/`g`/`Z` in places; the public names are `theta`/`nugget`/`y`.
-- `_config.py` — `pytree_config` and `static()`: frozen dataclasses registered with
+The model is laGP's: correlation `exp(-sum_k (x_k - x'_k)^2 / s_k)` with `s` the
+`squared_lengthscales` (laGP's `d`), a `nugget` on the diagonal (laGP's `g`), the scale profiled out
+as `residual_sum_of_squares = r' K^-1 r`, and a Student-t predictive with
+`degrees_of_freedom = active_count - trend_size`.
+
+- `_pytree.py` — `pytree_dataclass` and `static()`: frozen dataclasses registered with
   `jax.tree_util.register_dataclass`. A `static()` field is pytree metadata (part of the compiled
-  program, must be hashable); every other field is a child. `Param`, `Prior`, `LocalGP`, every
-  criterion and every search are built this way. No equinox: plain JAX does it.
-- `prior.py` — `Param(init, lower, upper, gamma, learn)` and `Prior(nugget=, theta= | lengthscale=)`.
-  A prior holds **exactly one** of `theta` and `lengthscale`; that choice is its `space`, and the
-  bounds and Gamma prior apply in that space (`theta = 2 l^2`). `to_theta`/`from_theta` convert.
-  `Prior.from_data` is the host-side numpy/scipy port of `darg`/`garg`/`getDs`/`Igamma.inv` (R's
-  `quantile` type 7 == numpy's default), computed in theta and mapped to `l` for
-  `space="lengthscale"`, with the Gamma prior recentered there. Its subsample of a >1000-row design
-  draws with an explicit `key`; a missing key is a `ValueError`, never a hidden draw. `learn` is
-  static — `fit` branches on it in Python.
-- `optim.py` — `bracketed_newton` for the nugget, `implicit_argmin`, and `r_ftol`. L-BFGS-B is
-  `vlse.optim.minimise`, called directly with `tol=0.0, ftol=r_ftol(dtype)` — R's `optim` default
-  `factr=1e7` times *float64's* epsilon and `pgtol=0`, in every dtype (scaling by float32's epsilon
-  gives ~1.2 and every fit stops after one step). `bracketed_newton` takes one `dfun` returning
-  `(d, d2)`, so the nugget fit gets both derivatives from a single factorization per iteration.
-  Neither solver reproduces R's iterate trajectory; they find the same KKT point.
-- `fit.py` — `fit_kernel`, `fit_nugget`, `fit_both` and `fit` dispatching on the prior's `learn`
-  flags; all return `(GP, FitInfo(theta, nugget, iterations, converged))`. The kernel solve runs in
-  the prior's space via `_kernel_llik`; in theta space that is exactly laGP's objective. `fit_both`
-  is jmleGPsep's alternation and carries `(v, nugget)` through its `while_loop` rather than a GP, so
-  the half-steps never factorize a `K` nobody reads. There is no conv=102 boundary reset: a start on
-  the lower bound is simply optimized.
-- `criteria.py` — `Criterion` subclasses `ALC` (port of `alcGPsep`), `NN`, `IECI(fmin, w=, nugget=)`
-  (`ieciGPsep`), and `Custom` wrapping a plain function. `minimize` and `cached` are class
-  attributes, read directly by the greedy loop and the searches. Number-valued settings
-  (`IECI.fmin`, `IECI.w`) are leaves — moving `fmin` every BO step does not recompile; flags
-  (`IECI.nugget`) are static. `alc` and `nn` are instances, so `lagpax.alc(gp, Xcand, Xref)` works.
-  `as_criterion` turns a name or function into one.
-- `search.py` — `Search` subclasses `Exhaustive`, `Ray(numrays=, iters=)`,
-  `Continuous(numstart=, maxit=)`, all-static and hashable by value; `as_search` resolves names.
-  Calling one takes `(criterion, gp, Xcand, Xref, taken, step, rect)` and returns one candidate
-  index. `_block` picks "the offset-th *available* candidate" the way laGP's deletion from its
-  candidate list does, by cumsum + `searchsorted`; an argsort there would dominate the search.
-- `model.py` — `LocalGP` (`neighbors`, `init`, `candidates`, `criterion`, `search`, `trend`,
-  `maxiter`) and `Emulator`. `LocalGP` is a pytree (sizes, `trend`, `maxiter` static; criterion and
-  search as children); `LocalGP.fit(X, y, prior=, key=)` resolves the prior and returns an
-  `Emulator` NamedTuple of `(model, X, y, prior)`, so the whole emulator is one pytree.
-  `_core(emu, Xref, theta0, full_cov=)` is jitted with only `full_cov` static. `Emulator.local` is
-  the per-location primitive; `__call__` is `jax.lax.map(batch_size=)` over it and `refine` swaps
-  the criterion with `model.replace(criterion=...)` between passes. `_design` carries the
-  candidate/design cross-covariance across greedy steps. `_buckets` groups the greedy steps by
-  padded capacity — step `t` builds its GP at the next power of two above `t`, not at
-  `neighbors` — so the loop traces a logarithmic number of bodies.
+  program, must be hashable); every other field is a child. Every config and state object in the
+  package is one of these or a NamedTuple. No equinox.
+- `kernel.py` — `squared_distances`, `correlation(left, right, squared_lengthscales)`,
+  `correlation_with_nugget`. Data first, parameters last, everywhere.
+- `priors.py` — `GammaPrior(shape, rate)` (`with_mass_below` is laGP's default rule),
+  `Param(initial, lower, upper, prior, learn)`, and `Prior(nugget=, squared_lengthscale= |
+  lengthscale=)`. A prior holds exactly one kernel `Param`; that choice is its `kernel_space`, and
+  bounds and Gamma prior apply in that space (`s = 2 l^2`). `Prior.from_data` is the host-side
+  numpy port of laGP's darg/garg (`default_squared_lengthscale`, `default_nugget`,
+  `pairwise_distance_summary`), mapped to `l` for `kernel_space="lengthscale"`. Its >1000-row
+  subsample needs an explicit `key`; without one it raises. `learn` is static.
+- `gaussian_process.py` — `Hyperparameters`, `Prediction`, and `GaussianProcess`, a pytree
+  dataclass built by `GaussianProcess.from_data(inputs, outputs, hyperparameters, active, trend)`
+  that caches `inverse_correlation` (ALC needs it), `log_det_correlation`,
+  `residual_sum_of_squares` and the trend's GLS pieces. `log_likelihood_at(gp, hyperparameters)`
+  is the fit's objective: one Cholesky, no inverse. `predictive_mean_and_scale` gives the Student-t
+  *scale* the criteria need; `Prediction` only ever carries the variance.
+- `optimize.py` — `with_implicit_gradient` (the derivative of an argmin, attached to a solver's
+  answer), `newton_maximize_on_interval` (the nugget solver), and `R_OPTIM_RELATIVE_TOLERANCE`,
+  R's `factr=1e7` times *float64's* epsilon in every dtype (float32's would make it ~1.2 and stop
+  every fit after one step). L-BFGS-B is `vlse.optim.minimise`, called directly.
+- `fitting.py` — `fit_hyperparameters` dispatching on the prior's `learn` flags to
+  `fit_squared_lengthscales`, `fit_nugget` or `fit_jointly` (laGP's jmleGPsep alternation, carrying
+  `(kernel values, nugget)` through its `while_loop`, not a GP). All return
+  `(GaussianProcess, FitResult(squared_lengthscales, nugget, iterations, converged))`. The kernel
+  solve runs in the prior's space; `_kernel_log_posterior` keeps laGP's summation order
+  (likelihood, then kernel prior, then nugget prior), so squared-lengthscale fits are laGP's.
+- `criteria.py` — `Criterion` subclasses `NearestNeighbor`, `ActiveLearningCohn`,
+  `IntegratedExpectedConditionalImprovement(best_observed, weights=, include_nugget=)` and
+  `CustomCriterion`. Class attributes `lower_is_better` and `reuses_candidate_correlation`.
+  `variance_reduction` is the shared rank-one update; `as_criterion` resolves "nn"/"alc".
+- `search.py` — `Search` subclasses `ExhaustiveSearch`, `RaySearch(rays=, golden_section_steps=)`,
+  `ContinuousSearch(starts=, max_iterations=)`, all static and hashable by value. Called as
+  `(criterion, gp, candidates, references, taken, step, bounding_box, candidate_correlation)`.
+  `untaken_by_rank` reproduces laGP's "k-th still-available candidate" by cumsum + searchsorted.
+- `local.py` — `LocalGP(neighbors, initial_neighbors, candidates, criterion, search, trend,
+  max_iterations)` and `Emulator(model, inputs, outputs, prior)`, both pytrees.
+  `_predict_local(emulator, references, starting_squared_lengthscales, full_covariance=)` is the
+  jitted core; `Emulator.predict_local` is the per-point primitive, `__call__` is
+  `lax.map(batch_size=)` over it, `refine` swaps the criterion between passes. `_select_design`
+  carries a `DesignState(chosen, active, taken, candidate_correlation)` through the greedy loop,
+  and `design_buckets` groups its steps by padded GP size (next power of two), so it traces
+  logarithmically many loop bodies.
 
-The public API is flat: `__init__.py` re-exports every name and pins them in `__all__`, so a new
-public name goes in two places there. **Importing lagpax changes no global state.** Computation
-follows the input's floating dtype; laGP parity needs float64, so `tests/conftest.py`,
-`tests/snapshot.py` and `bench/common.py` turn `jax_enable_x64` on before any data exists, and so
-must a user who wants laGP's numbers. Without it the pipeline runs in float32
-(`test_transforms` pins that in a subprocess).
+The public API is flat: `__init__.py` re-exports every name and pins them in `__all__`.
+**Importing lagpax changes no global state.** Computation follows the input's floating dtype;
+laGP parity needs float64, so `tests/conftest.py`, `tests/snapshot.py` and `bench/common.py` turn
+`jax_enable_x64` on before any data exists, and so must a user who wants laGP's numbers. Without
+it the pipeline runs in float32 (`test_transforms` pins that in a subprocess).
 
 ### Why the mask exists
 
 Greedy design selection grows the local design one point at a time, but XLA needs fixed shapes.
-`GP.mask` marks the active rows, and there are **four** invariants: masked rows/columns of `K` are set
-to the identity, so `ldetK` gains 0; masked `y` entries are zeroed so `phi` is unaffected; masked `F`
-rows are zeroed so the GLS solve ignores them; and the identity block in `Ki` is killed by masking
-`k`/`kx` in `_moments`/`_predict`/`alc`. Break any one and the padded GP silently stops matching the
+`GaussianProcess.active` marks the rows in the model, and there are **four** invariants: inactive
+rows/columns of the correlation are the identity, so `log_det_correlation` gains 0; inactive
+outputs are zeroed so `residual_sum_of_squares` is unaffected; inactive trend rows are zeroed so
+the GLS solve ignores them; and the identity block in `inverse_correlation` is killed by masking
+the cross-correlations in `predictive_mean_and_scale`/`predict`/`variance_reduction`. Break any one and the padded GP silently stops matching the
 unpadded one — `tests/test_gp.py::test_mask_matches_a_smaller_design`,
 `tests/test_criteria.py::test_alc_ignores_masked_rows` and the trend mask test in `tests/test_trend.py`
 are the guards.
@@ -162,7 +157,7 @@ the parity suite and on rmse, never on whether `neighbors` is unchanged.**
 
 ### Gradients through the fit
 
-`optim.implicit_argmin` is what makes `jax.grad` work through `fit`. Both solvers are
+`optimize.with_implicit_gradient` is what makes `jax.grad` work through the fits. Both solvers are
 `lax.while_loop`s with no reverse-mode rule, so the answer is computed under `stop_gradient` and the
 derivative attached afterwards: one Newton step from the frozen solution carries exactly the
 implicit-function term, and subtracting its own `stop_gradient` leaves the **value bit-identical**.
@@ -176,14 +171,16 @@ on the test designs (see `ROADMAP.md` § What we learned).
 
 ### laGP conventions the parity tests have to bridge
 
-- laGP's `d`/`g` are `theta`/`nugget`; its `Xi` (1-based) is `neighbors` (0-based).
+- laGP's `d`/`g` are `squared_lengthscales`/`nugget`; its `Xi` (1-based) is `neighbors` (0-based);
+  its `ab` pairs are `GammaPrior(shape, rate)`, with `ab=c(0,0)` meaning `prior=None`.
 - `laGPsep` and `predGPsep` return the raw Student-t scale `s2`; lagpax always returns the variance.
   Compare `variance` with `s2 * df / (df - 2)`. `aGPsep`'s `var` is already the variance.
 - `darg`/`garg` subsample the design when `n > 1000` using R's RNG, so parity tests stay under 1000.
-- `dllikGPsep` is not exported from the laGP namespace; call it as `laGP:::dllikGPsep`. Same for
-  `ieciGPsep`.
+- `dllikGPsep` and `ieciGPsep` are not exported from the laGP namespace; call them with `laGP:::`.
 - laGP's ray search draws its starting points with R's `sample()`; lagpax's are deterministic, so
   `test_search` asserts design quality, not identity.
+- laGP computes the default Gamma rate as `Igamma.inv(a, 0.95 * gamma(a), ...)`, lagpax as
+  `gammaincinv(a, 0.95)`; they agree to an ulp, which is all the fitted values move by.
 
 ## API
 
@@ -192,32 +189,30 @@ jax.config.update("jax_enable_x64", True)   # the caller's choice; needed for la
 key = jax.random.key(0)
 
 model = lagpax.LocalGP(
-    neighbors=50, init=6,
-    criterion="alc",        # "nn" | "alc" | lagpax.IECI(fmin=...) | a Criterion | a function
-    search="exhaustive",    # "exhaustive" | "ray" | "continuous" | lagpax.Ray(numrays=...) | ...
+    neighbors=50, initial_neighbors=6,
+    criterion="alc",        # "nn" | "alc" | lagpax.IntegratedExpectedConditionalImprovement(...) | ...
+    search="exhaustive",    # "exhaustive" | "ray" | "continuous" | lagpax.RaySearch(rays=...) | ...
     trend="zero",           # "zero" | "constant" | "linear"; "zero" is laGP's simple kriging
-    candidates=None, maxiter=100,
+    candidates=None, max_iterations=100,
 )
-emu = model.fit(X, y, prior=None, key=key)          # -> Emulator, a pytree
-out = emu(Xnew, batch=256)                          # one local GP per row (aGPsep)
-out = emu.local(Xref, theta0=None, full_cov=False)  # one local GP for a reference set (laGPsep)
-out = jax.vmap(lambda x: emu.local(x[None]))(Xnew)  # ... batched yourself
-out = emu.refine(Xnew, passes=("nn", "alc"))
-emu = emu._replace(y=ynew)                          # same model and prior, new responses
-out.mean, out.variance, out.dof, out.log_likelihood, out.covariance, out.neighbors, out.fit
+emulator = model.fit(inputs, outputs, prior=None, key=key)   # -> Emulator, a pytree
+prediction = emulator(new_inputs, batch_size=256)           # one local GP per row (aGPsep)
+prediction = emulator.predict_local(references, full_covariance=False)   # laGPsep
+prediction = jax.vmap(lambda x: emulator.predict_local(x[None]))(new_inputs)
+prediction = emulator.refine(new_inputs, passes=("nn", "alc"))
+emulator = emulator._replace(outputs=new_outputs)
+prediction.mean, .variance, .degrees_of_freedom, .log_likelihood, .covariance, .neighbors, .fit
 
-prior = lagpax.Prior.from_data(X, y, key=key)                       # Gamma prior on theta
-prior = lagpax.Prior.from_data(X, y, key=key, space="lengthscale")  # ... or on l = sqrt(theta/2)
+prior = lagpax.Prior.from_data(inputs, outputs, key=key)                          # on s
+prior = lagpax.Prior.from_data(inputs, outputs, key=key, kernel_space="lengthscale")  # on l
 prior = prior.replace(nugget=lagpax.Param(learn=True))
 
-gp = lagpax.GP(X, y, theta, nugget, mask=None, trend="zero")
-gp.log_likelihood(prior=None)            # MAP objective when a prior is passed
-gp.predict(Xnew, full_cov=False, nugget=True)
-gp.append(Xmore, ymore); gp.replace(theta=..., nugget=...)
-gp, info = lagpax.fit(gp, prior)         # info: FitInfo(theta, nugget, iterations, converged)
+gp = lagpax.GaussianProcess.from_data(inputs, outputs, lagpax.Hyperparameters(s, nugget))
+gp.log_likelihood(prior=None); gp.predict(new_inputs, full_covariance=False, include_nugget=True)
+gp.with_hyperparameters(h); gp.with_observations(more_inputs, more_outputs)
+gp, result = lagpax.fit_hyperparameters(gp, prior)   # FitResult(squared_lengthscales, nugget, ...)
 
-lagpax.alc(gp, Xcand, Xref)              # criteria: (gp, Xcand, Xref) -> Float[Array, "ncand"]
-lagpax.IECI(fmin=...)(gp, Xcand, Xref)
+lagpax.ActiveLearningCohn()(gp, candidates, references)   # criteria: -> one score per candidate
 ```
 
 Load-bearing design points:
@@ -227,8 +222,8 @@ Load-bearing design points:
   leak back into the per-location path. Hyperparameters are fitted per location when the emulator
   is called, not in `fit`.
 - **Static vs leaf is a design decision per field.** Anything that selects code or sets a shape
-  (`neighbors`, `init`, `candidates`, `trend`, `maxiter`, `IECI.nugget`, `Ray.numrays`,
-  `Param.learn`, which of `theta`/`lengthscale` a Prior holds) is static or structural; anything
+  (`neighbors`, `initial_neighbors`, `candidates`, `trend`, `max_iterations`, `include_nugget`,
+  `rays`, `Param.learn`, which kernel space a Prior is in) is static or structural; anything
   numeric is a leaf. Getting it wrong is silent: a number marked static recompiles on every change,
   a flag left as a leaf fails with a ConcretizationTypeError the first time Python branches on it.
 - **No hidden randomness.** Every random draw takes a `jax.random` key. Where R would use its global
@@ -243,13 +238,14 @@ Load-bearing design points:
 Beyond laGP: **trend models** (`trend="constant"`/`"linear"`, sold as interval calibration, not a
 better mean — `tests/test_trend.py` tests coverage), **gradients through fitting** with a compilable
 pipeline, and **a prior on the conventional lengthscale**. Easy to under-use: **iterated
-refinement** — `("nn", "alc")` picks neighbourhoods at fitted `theta` and cuts rmse ~1.7-2x on
-anisotropic problems.
+refinement** — `("nn", "alc")` picks neighbourhoods at fitted squared lengthscales and cuts rmse
+~1.7-2x on anisotropic problems.
 
 ## tests/
 
 `tests/conftest.py` provides the `R` fixture (rpy2 + laGP, skipping when either is unavailable) and the
-shared designs: `small` (40x3), `medium` (600x4), `wide` (200x8), `noisy` (300x3 with observation
+shared designs, and `tests/helpers.py` the constructors the modules share (`make_gp`, `lagp_prior`
+from laGP's range/ab arguments, `log_likelihood_gradient`). The designs: `small` (40x3), `medium` (600x4), `wide` (200x8), `noisy` (300x3 with observation
 noise).
 
 - **Parity against R:** `test_covar` (kernel), `test_gp`, `test_prior`, `test_fit`, `test_criteria`,
@@ -328,15 +324,17 @@ as a whole, which is why the floor has to move to 0.1.4 once it is on PyPI.
   CI's runner does not show this.
 - Piping a long background run through `tail` buffers everything until it exits. Let it write its
   CSV and read that instead.
-- Monkeypatching a function that `model._core` closes over does nothing — `_core` is jitted and the
-  closure is not part of its cache key. Call `model._core.clear_cache()` between configurations.
+- Monkeypatching a function that `local._predict_local` closes over does nothing — it is jitted and
+  the closure is not part of its cache key. Call `local._predict_local.clear_cache()` between
+  configurations.
 - vlse reads its default tolerances as arrays created at import; pass `tol`/`ftol` explicitly (as
   the call sites do) rather than relying on them under x64.
 - Under an enclosing trace, `jnp.sqrt(constant)` is a tracer, so `float(jnp.sqrt(...))` raises a
   ConcretizationTypeError — but only when the caller is inside `jit`/`while_loop`, which eager tests
   and the snapshot never are. Compute host-side constants with `math`/`numpy`.
 - `some_jitted_fn._cache_size()` counts top-level dispatches only. A jitted function called inside
-  another trace (`_core` inside the emulator's `lax.map`) is inlined and never touches that cache, so
-  a recompilation test has to call it at top level (`emu.local`, not `emu(...)`).
+  another trace (`_predict_local` inside the emulator's `lax.map`) is inlined and never touches that
+  cache, so a recompilation test has to call it at top level (`emulator.predict_local`, not
+  `emulator(...)`).
 - There is no `gh` CLI on the cluster. Check CI with
   `curl -s https://api.github.com/repos/davidesartor/lagpax/actions/runs?per_page=3`.

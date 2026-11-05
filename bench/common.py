@@ -80,10 +80,12 @@ class RlaGP:
             self(
                 f"dprior <- list(start=dstart, mle={'TRUE' if d.learn else 'FALSE'}, "
                 "min=dmin, max=dmax, ab=dab)",
-                dstart=np.atleast_1d(d.init),
+                dstart=np.atleast_1d(d.initial),
                 dmin=np.array([d.lower]),
                 dmax=np.array([d.upper]),
-                dab=np.asarray(d.gamma),
+                dab=np.asarray(
+                    (0.0, 0.0) if d.prior is None else (d.prior.shape, d.prior.rate)
+                ),
             )
             arg = ", d=dprior"
         self(
