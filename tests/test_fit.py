@@ -8,15 +8,18 @@ objective being no worse than laGP's.
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from helpers import (
+    fit_both,
+    fit_kernel_only,
+    fit_nugget_only,
+    gamma,
+    lagp_prior,
+    log_likelihood_gradient,
+    make_gp,
+)
 
 import lagpax as lagp
-from helpers import gamma, lagp_prior, log_likelihood_gradient, make_gp
-from lagpax.fitting import (
-    _kernel_log_posterior,
-    fit_jointly,
-    fit_nugget,
-    fit_squared_lengthscales,
-)
+from lagpax.fitting import _kernel_log_posterior
 from lagpax.optimize import newton_maximize_on_interval
 from lagpax.priors import Param, Prior
 
@@ -38,9 +41,7 @@ def _llik_at(design, d, g, dab=(0.0, 0.0), gab=(0.0, 0.0)):
     return float(gp.log_likelihood(lagp_prior(dab, gab)))
 
 
-def _prior(
-    dab=(0.0, 0.0), gab=(0.0, 0.0), drange=DRANGE, grange=GRANGE, learn=(True, True)
-):
+def _prior(dab=(0.0, 0.0), gab=(0.0, 0.0), drange=DRANGE, grange=GRANGE, learn=(True, True)):
     return lagp_prior(dab, gab, drange, grange, learn)
 
 
@@ -51,7 +52,7 @@ def test_squared_lengthscale_fit_finds_the_same_optimum_as_r(R, request, design)
     d0 = np.full(X.shape[1], 0.5)
     dab = (1.5, 3.9)
 
-    _, res = fit_squared_lengthscales(_gp(data, d0), _prior(dab=dab))
+    _, res = fit_kernel_only(_gp(data, d0), _prior(dab=dab))
     want = np.asarray(
         R(
             f"{NEWGP}; out <- mleGPsep(gpi, param='d', tmin=tmin, tmax=tmax, ab=ab); "
@@ -75,7 +76,7 @@ def test_squared_lengthscale_fit_respects_the_box(R, wide):
     X, Z = wide
     d0 = np.full(X.shape[1], 0.4)
     lo, hi = 0.3, 0.6
-    _, res = fit_squared_lengthscales(_gp((X, Z), d0), _prior(drange=(lo, hi)))
+    _, res = fit_kernel_only(_gp((X, Z), d0), _prior(drange=(lo, hi)))
     d = np.asarray(res.squared_lengthscales)
     assert np.all(d >= lo - 1e-12) and np.all(d <= hi + 1e-12)
 
@@ -86,8 +87,8 @@ def test_a_start_on_the_bound_is_simply_optimized(small):
     X, Z = small
     lo, hi = 0.2, 5.0
     prior = _prior(drange=(lo, hi))
-    _, edge = fit_squared_lengthscales(_gp(small, np.full(X.shape[1], lo)), prior)
-    _, inner = fit_squared_lengthscales(_gp(small, np.full(X.shape[1], 1.0)), prior)
+    _, edge = fit_kernel_only(_gp(small, np.full(X.shape[1], lo)), prior)
+    _, inner = fit_kernel_only(_gp(small, np.full(X.shape[1], 1.0)), prior)
     assert bool(edge.converged) and int(edge.iterations) > 0
     assert _llik_at(small, edge.squared_lengthscales, G) == pytest.approx(
         _llik_at(small, inner.squared_lengthscales, G), abs=1e-6
@@ -115,7 +116,7 @@ def test_nugget_fit_finds_the_same_optimum_as_r(R, request, design):
     d0 = np.full(X.shape[1], 0.5)
     gab = (1.5, 4.0)
 
-    got = float(fit_nugget(_gp(data, d0, g=1e-2), _prior(gab=gab))[1].nugget)
+    got = float(fit_nugget_only(_gp(data, d0, g=1e-2), _prior(gab=gab))[1].nugget)
     want = _r_mle_nug(R, X, Z, d0, gab)
 
     assert got == pytest.approx(want, rel=1e-4, abs=1e-10)
@@ -128,7 +129,7 @@ def test_nugget_fit_is_no_worse_than_r_on_a_noiseless_design(R, medium):
     d0 = np.full(X.shape[1], 0.5)
     gab = (1.5, 4.0)
 
-    got = float(fit_nugget(_gp(medium, d0, g=1e-2), _prior(gab=gab))[1].nugget)
+    got = float(fit_nugget_only(_gp(medium, d0, g=1e-2), _prior(gab=gab))[1].nugget)
     want = _r_mle_nug(R, X, Z, d0, gab)
 
     assert GRANGE[0] <= got <= GRANGE[1]
@@ -139,7 +140,7 @@ def test_nugget_fit_gradient_vanishes_at_the_optimum(noisy):
     X, Z = noisy
     d0 = np.full(X.shape[1], 0.5)
     gab = (1.5, 4.0)
-    gp, res = fit_nugget(_gp(noisy, d0, g=1e-2), _prior(gab=gab))
+    gp, res = fit_nugget_only(_gp(noisy, d0, g=1e-2), _prior(gab=gab))
     assert GRANGE[0] < float(res.nugget) < GRANGE[1]
     assert abs(float(log_likelihood_gradient(gp, _prior(gab=gab)).nugget)) < 1e-4
 
@@ -169,18 +170,14 @@ def test_joint_fit_matches_r(R, request, design):
     dab, gab = (1.5, 3.9), (1.5, 4.0)
     m = X.shape[1]
 
-    _, res = fit_jointly(_gp(data, d0), _prior(dab, gab))
+    _, res = fit_both(_gp(data, d0), _prior(dab, gab))
     want = _r_jmle(R, X, Z, d0, dab, gab)
     d_want, g_want = want[:m], want[m]
 
-    np.testing.assert_allclose(
-        np.asarray(res.squared_lengthscales), d_want, rtol=1e-3, atol=1e-6
-    )
+    np.testing.assert_allclose(np.asarray(res.squared_lengthscales), d_want, rtol=1e-3, atol=1e-6)
     assert float(res.nugget) == pytest.approx(g_want, rel=5e-3, abs=1e-8)
 
-    ours = _llik_at(
-        data, np.asarray(res.squared_lengthscales), float(res.nugget), dab=dab, gab=gab
-    )
+    ours = _llik_at(data, np.asarray(res.squared_lengthscales), float(res.nugget), dab=dab, gab=gab)
     theirs = _llik_at(data, d_want, g_want, dab=dab, gab=gab)
     assert ours >= theirs - 1e-5 * max(1.0, abs(theirs))
 
@@ -191,7 +188,7 @@ def test_joint_fit_is_no_worse_than_r_on_a_noiseless_design(R, medium):
     dab, gab = (1.5, 3.9), (1.5, 4.0)
     m = X.shape[1]
 
-    _, res = fit_jointly(_gp(medium, d0), _prior(dab, gab))
+    _, res = fit_both(_gp(medium, d0), _prior(dab, gab))
     want = _r_jmle(R, X, Z, d0, dab, gab)
 
     ours = _llik_at(
@@ -247,8 +244,8 @@ def test_without_a_prior_the_space_does_not_move_the_optimum(request, design):
     """The likelihood is invariant to reparameterization, so the MLE is the same point."""
     data = request.getfixturevalue(design)
     d0 = np.full(data[0].shape[1], 0.5)
-    _, in_theta = fit_squared_lengthscales(_gp(data, d0), _prior())
-    _, in_ell = fit_squared_lengthscales(_gp(data, d0), _ell_prior())
+    _, in_theta = fit_kernel_only(_gp(data, d0), _prior())
+    _, in_ell = fit_kernel_only(_gp(data, d0), _ell_prior())
     np.testing.assert_allclose(
         np.asarray(in_ell.squared_lengthscales),
         np.asarray(in_theta.squared_lengthscales),
@@ -265,7 +262,7 @@ def test_a_lengthscale_prior_is_a_map_in_lengthscale(noisy):
 
     d0 = np.full(noisy[0].shape[1], 0.5)
     prior = _ell_prior(shape_rate=(1.5, 3.0))
-    gp, res = fit_squared_lengthscales(_gp(noisy, d0), prior)
+    gp, res = fit_kernel_only(_gp(noisy, d0), prior)
     ell = res.lengthscales
     assert np.all(np.asarray(ell) > prior.lengthscale.lower)
     nugget = gp.hyperparameters.nugget
@@ -273,7 +270,7 @@ def test_a_lengthscale_prior_is_a_map_in_lengthscale(noisy):
     assert np.max(np.abs(np.asarray(grad))) < 1e-3
 
     # and it is a different point from the theta-space MAP under a theta prior
-    _, theta_map = fit_squared_lengthscales(_gp(noisy, d0), _prior(dab=(1.5, 3.0)))
+    _, theta_map = fit_kernel_only(_gp(noisy, d0), _prior(dab=(1.5, 3.0)))
     assert not np.allclose(
         np.asarray(res.squared_lengthscales),
         np.asarray(theta_map.squared_lengthscales),

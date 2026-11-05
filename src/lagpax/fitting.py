@@ -38,158 +38,128 @@ class FitResult(NamedTuple):
 
 
 def fit_hyperparameters(
-    gp: GaussianProcess, prior: Prior, max_iterations: int = 100
-) -> tuple[GaussianProcess, FitResult]:
-    """Fit whatever the prior marks `learn`, returning the refit process and the result."""
-    learn_kernel, learn_nugget = bool(prior.kernel.learn), bool(prior.nugget.learn)
-    if learn_kernel and learn_nugget:
-        return fit_jointly(gp, prior, max_iterations)
-    if learn_kernel:
-        return fit_squared_lengthscales(gp, prior, max_iterations)
-    if learn_nugget:
-        return fit_nugget(gp, prior, max_iterations)
-    hyperparameters = gp.hyperparameters
-    unchanged = FitResult(
-        hyperparameters.squared_lengthscales,
-        hyperparameters.nugget,
-        jnp.asarray(0),
-        jnp.asarray(True),
-    )
-    return gp, unchanged
-
-
-def fit_squared_lengthscales(
-    gp: GaussianProcess, prior: Prior, max_iterations: int = 100
-) -> tuple[GaussianProcess, FitResult]:
-    """MAP kernel parameter at the process's nugget."""
-    lower, upper = _kernel_bounds(prior, gp)
-    nugget = gp.hyperparameters.nugget
-    start = _kernel_start(prior, gp, lower, upper)
-    solution, iterations, converged = _solve_kernel(
-        frozen(gp),
-        frozen(start),
-        frozen(nugget),
-        frozen(lower),
-        frozen(upper),
-        frozen(prior),
-        max_iterations,
-    )
-    solution = with_implicit_gradient(
-        lambda values: -_kernel_log_posterior(gp, values, nugget, prior),
-        solution,
-        lower,
-        upper,
-    )
-    squared = prior.to_squared_lengthscales(solution)
-    refit = gp.with_hyperparameters(Hyperparameters(squared, nugget))
-    return refit, FitResult(squared, nugget, iterations, converged)
-
-
-def fit_nugget(
-    gp: GaussianProcess, prior: Prior, max_iterations: int = 100
-) -> tuple[GaussianProcess, FitResult]:
-    """MAP nugget at the process's squared lengthscales."""
-    dtype = gp.inputs.dtype
-    squared = gp.hyperparameters.squared_lengthscales
-    nugget, iterations = _solve_nugget(
-        frozen(gp),
-        frozen(squared),
-        frozen(gp.hyperparameters.nugget),
-        frozen(prior.nugget.lower),
-        frozen(prior.nugget.upper),
-        frozen(prior),
-        max_iterations,
-    )
-    nugget = with_implicit_gradient(
-        lambda values: -_nugget_log_posterior(gp, squared, values[0], prior),
-        jnp.atleast_1d(nugget),
-        _filled(prior.nugget.lower, 1, dtype),
-        _filled(prior.nugget.upper, 1, dtype),
-    )[0]
-    refit = gp.with_hyperparameters(Hyperparameters(squared, nugget))
-    return refit, FitResult(squared, nugget, iterations, jnp.asarray(True))
-
-
-def fit_jointly(
     gp: GaussianProcess, prior: Prior, max_iterations: int = 100, max_rounds: int = 100
 ) -> tuple[GaussianProcess, FitResult]:
-    """Alternate kernel and nugget solves until both settle."""
+    """Fit whatever the prior marks `learn`, returning the refit process and the result.
+
+    `iterations` and `converged` describe the kernel solve, or the nugget's when only the nugget
+    is learned. Hyperparameters that are not learned keep their values and their gradients.
+    """
+    learn_kernel, learn_nugget = bool(prior.kernel.learn), bool(prior.nugget.learn)
+    current = gp.hyperparameters
+    if not (learn_kernel or learn_nugget):
+        unchanged = FitResult(
+            current.squared_lengthscales, current.nugget, jnp.asarray(0), jnp.asarray(True)
+        )
+        return gp, unchanged
+
     dimension, dtype = gp.dimension, gp.inputs.dtype
-    kernel_lower, kernel_upper = _kernel_bounds(prior, gp)
-    nugget_lower = _filled(prior.nugget.lower, 1, dtype)
-    nugget_upper = _filled(prior.nugget.upper, 1, dtype)
+    live_kernel = _filled(
+        prior.from_squared_lengthscales(current.squared_lengthscales), dimension, dtype
+    )
+    live_nugget = _filled(current.nugget, 1, dtype)
+    live = jnp.concatenate([live_kernel, live_nugget])
+    lower, upper = (
+        jnp.concatenate(
+            [
+                _filled(getattr(prior.kernel, side), dimension, dtype)
+                if learn_kernel
+                else live_kernel,
+                _filled(getattr(prior.nugget, side), 1, dtype) if learn_nugget else live_nugget,
+            ]
+        )
+        for side in ("lower", "upper")
+    )
     fixed_gp, fixed_prior = frozen(gp), frozen(prior)
 
-    def unsettled(state):
-        _, _, kernel_iterations, nugget_iterations, converged, round_index = state
-        settled = (
-            (nugget_iterations <= 2) & (kernel_iterations <= dimension + 1) & converged
+    def solve_kernel(kernel_values, nugget):
+        state = minimise(
+            lambda values: -_kernel_log_posterior(fixed_gp, values, nugget, fixed_prior),
+            kernel_values,
+            bounds=(lower[:dimension], upper[:dimension]),
+            tol=0.0,
+            ftol=R_OPTIM_RELATIVE_TOLERANCE,
+            max_iterations=max_iterations,
         )
-        return (round_index < max_rounds) & ~settled
+        stopped_by_a_rule = (state.error <= 0.0) | state.converged_ftol | state.failed_linesearch
+        return state.x, state.iteration, stopped_by_a_rule | (state.iteration < max_iterations)
 
-    def alternate(state):
-        kernel_values, nugget, _, _, _, round_index = state
-        kernel_values, kernel_iterations, converged = _solve_kernel(
-            fixed_gp,
-            kernel_values,
-            nugget,
-            kernel_lower,
-            kernel_upper,
-            fixed_prior,
-            max_iterations,
+    def solve_nugget(squared_lengthscales, nugget):
+        slope = jax.grad(
+            lambda g: _nugget_log_posterior(fixed_gp, squared_lengthscales, g, fixed_prior)
         )
-        squared = fixed_prior.to_squared_lengthscales(kernel_values)
-        nugget, nugget_iterations = _solve_nugget(
-            fixed_gp,
-            squared,
+        return newton_maximize_on_interval(
+            lambda g: jax.jvp(slope, (g,), (jnp.ones_like(g),)),
             nugget,
-            nugget_lower[0],
-            nugget_upper[0],
-            fixed_prior,
-            max_iterations,
-        )
-        return (
-            kernel_values,
-            nugget,
-            kernel_iterations,
-            nugget_iterations,
-            converged,
-            round_index + 1,
+            lower[dimension],
+            upper[dimension],
+            max_iterations=max_iterations,
         )
 
-    start = _kernel_start(prior, gp, kernel_lower, kernel_upper)
-    initial_state = frozen(
-        (
-            start,
-            gp.hyperparameters.nugget,
+    kernel_values = frozen(jnp.clip(live[:dimension], lower[:dimension], upper[:dimension]))
+    nugget = frozen(current.nugget)
+    if learn_kernel and learn_nugget:
+
+        def unsettled(state):
+            _, _, kernel_iterations, nugget_iterations, converged, round_index = state
+            settled = (nugget_iterations <= 2) & (kernel_iterations <= dimension + 1) & converged
+            return (round_index < max_rounds) & ~settled
+
+        def alternate(state):
+            kernel_values, nugget, _, _, _, round_index = state
+            kernel_values, kernel_iterations, converged = solve_kernel(kernel_values, nugget)
+            squared = fixed_prior.to_squared_lengthscales(kernel_values)
+            nugget, nugget_iterations = solve_nugget(squared, nugget)
+            return (
+                kernel_values,
+                nugget,
+                kernel_iterations,
+                nugget_iterations,
+                converged,
+                round_index + 1,
+            )
+
+        initial_state = (
+            kernel_values,
+            nugget,
             jnp.asarray(dimension + 2),
             jnp.asarray(3),
             jnp.asarray(True),
             0,
         )
-    )
-    kernel_values, nugget, kernel_iterations, _, converged, _ = jax.lax.while_loop(
-        unsettled, alternate, initial_state
-    )
+        kernel_values, nugget, iterations, _, converged, _ = jax.lax.while_loop(
+            unsettled, alternate, initial_state
+        )
+    elif learn_kernel:
+        kernel_values, iterations, converged = solve_kernel(kernel_values, nugget)
+    else:
+        nugget, iterations = solve_nugget(frozen(current.squared_lengthscales), nugget)
+        converged = jnp.asarray(True)
 
-    joint = with_implicit_gradient(
+    learned = jnp.concatenate([jnp.full(dimension, learn_kernel), jnp.array([learn_nugget])])
+    solution = with_implicit_gradient(
         lambda values: (
             -_kernel_log_posterior(
                 gp,
-                values[:dimension],
-                values[dimension],
+                jnp.where(learned, values, live)[:dimension],
+                jnp.where(learned, values, live)[dimension],
                 prior,
                 include_nugget_prior=True,
             )
         ),
         jnp.concatenate([kernel_values, jnp.atleast_1d(nugget)]),
-        jnp.concatenate([kernel_lower, nugget_lower]),
-        jnp.concatenate([kernel_upper, nugget_upper]),
+        lower,
+        upper,
+        free=learned,
     )
-    squared = prior.to_squared_lengthscales(joint[:dimension])
-    nugget = joint[dimension]
+    squared = (
+        prior.to_squared_lengthscales(solution[:dimension])
+        if learn_kernel
+        else current.squared_lengthscales
+    )
+    nugget = solution[dimension] if learn_nugget else current.nugget
     refit = gp.with_hyperparameters(Hyperparameters(squared, nugget))
-    return refit, FitResult(squared, nugget, kernel_iterations, converged)
+    return refit, FitResult(squared, nugget, iterations, converged)
 
 
 def _kernel_log_posterior(
@@ -219,70 +189,5 @@ def _nugget_log_posterior(
     return likelihood + prior.nugget_log_density(nugget)
 
 
-def _solve_kernel(
-    gp: GaussianProcess,
-    start: Float[Array, "d"],
-    nugget: Scalar,
-    lower: Float[Array, "d"],
-    upper: Float[Array, "d"],
-    prior: Prior,
-    max_iterations: int,
-) -> tuple[Float[Array, "d"], Int[Array, ""], Bool[Array, ""]]:
-    state = minimise(
-        lambda values: -_kernel_log_posterior(gp, values, nugget, prior),
-        start,
-        bounds=(lower, upper),
-        tol=0.0,
-        ftol=R_OPTIM_RELATIVE_TOLERANCE,
-        max_iterations=max_iterations,
-    )
-    stopped_by_a_rule = (
-        (state.error <= 0.0) | state.converged_ftol | state.failed_linesearch
-    )
-    converged = stopped_by_a_rule | (state.iteration < max_iterations)
-    return state.x, state.iteration, converged
-
-
-def _solve_nugget(
-    gp: GaussianProcess,
-    squared_lengthscales: Float[Array, "d"],
-    start: Scalar,
-    lower: Scalar,
-    upper: Scalar,
-    prior: Prior,
-    max_iterations: int,
-) -> tuple[Scalar, Int[Array, ""]]:
-    slope = jax.grad(
-        lambda nugget: _nugget_log_posterior(gp, squared_lengthscales, nugget, prior)
-    )
-    return newton_maximize_on_interval(
-        lambda nugget: jax.jvp(slope, (nugget,), (jnp.ones_like(nugget),)),
-        start,
-        lower,
-        upper,
-        max_iterations=max_iterations,
-    )
-
-
 def _filled(value, size: int, dtype) -> Float[Array, "size"]:
     return jnp.broadcast_to(jnp.atleast_1d(jnp.asarray(value, dtype)), (size,))
-
-
-def _kernel_bounds(
-    prior: Prior, gp: GaussianProcess
-) -> tuple[Float[Array, "d"], Float[Array, "d"]]:
-    dtype = gp.inputs.dtype
-    return (
-        _filled(prior.kernel.lower, gp.dimension, dtype),
-        _filled(prior.kernel.upper, gp.dimension, dtype),
-    )
-
-
-def _kernel_start(
-    prior: Prior,
-    gp: GaussianProcess,
-    lower: Float[Array, "d"],
-    upper: Float[Array, "d"],
-) -> Float[Array, "d"]:
-    current = prior.from_squared_lengthscales(gp.hyperparameters.squared_lengthscales)
-    return jnp.clip(_filled(current, gp.dimension, gp.inputs.dtype), lower, upper)

@@ -7,14 +7,13 @@ degenerates to exhaustive ALC when it is allowed to look everywhere, and that th
 it produces are as good as laGP's by the measure the search is trying to optimize.
 """
 
-import numpy as np
-import pytest
-
 import jax
 import jax.numpy as jnp
+import numpy as np
+import pytest
+from helpers import make_gp
 
 import lagpax as lagp
-from helpers import make_gp
 from lagpax import search as searches
 from lagpax.optimize import R_OPTIM_RELATIVE_TOLERANCE
 
@@ -43,9 +42,7 @@ def _predict(X, Z, XX, batch_size=256, **settings):
 def _state(X, Z, Xref, ndesign=11):
     """A greedy loop frozen mid-flight: a small GP, and the rest as candidates."""
     prior = lagp.Prior.from_data(X, Z)
-    d0 = np.broadcast_to(
-        np.asarray(prior.squared_lengthscale.initial, float), (X.shape[1],)
-    )
+    d0 = np.broadcast_to(np.asarray(prior.squared_lengthscale.initial, float), (X.shape[1],))
     g0 = float(prior.nugget.initial)
     order = np.argsort(np.sum(np.square(X - Xref), axis=-1))
     gp = make_gp(X[order[:ndesign]], Z[order[:ndesign]], d0, g0)
@@ -175,9 +172,7 @@ def test_search_designs_are_competitive_with_lagp(R, medium, search, method):
     """
     X, Z = medium
     prior = lagp.Prior.from_data(X, Z)
-    d0 = np.broadcast_to(
-        np.asarray(prior.squared_lengthscale.initial, float), (X.shape[1],)
-    )
+    d0 = np.broadcast_to(np.asarray(prior.squared_lengthscale.initial, float), (X.shape[1],))
     g0 = float(prior.nugget.initial)
 
     ratios = []
@@ -198,9 +193,7 @@ def test_search_designs_are_competitive_with_lagp(R, medium, search, method):
             - 1
         )
         ours = np.asarray(_local(X, Z, Xref, search=search).neighbors)
-        ratios.append(
-            _var_of(X, Z, ours, Xref, d0, g0) / _var_of(X, Z, Xi, Xref, d0, g0)
-        )
+        ratios.append(_var_of(X, Z, ours, Xref, d0, g0) / _var_of(X, Z, Xi, Xref, d0, g0))
 
     assert float(np.median(ratios)) <= 1.5
 
@@ -254,9 +247,7 @@ def test_ray_end_stays_inside_the_box():
     # each ray keeps its direction and reaches a face
     step = Xend - Xstart
     assert bool(jnp.all(jnp.sum(step * (Xstart - Xref), axis=-1) >= -1e-12))
-    on_face = jnp.min(
-        jnp.minimum(jnp.abs(Xend - rect[0]), jnp.abs(Xend - rect[1])), axis=-1
-    )
+    on_face = jnp.min(jnp.minimum(jnp.abs(Xend - rect[0]), jnp.abs(Xend - rect[1])), axis=-1)
     assert bool(jnp.all(on_face < 1e-9))
 
 

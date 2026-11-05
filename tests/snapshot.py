@@ -80,12 +80,8 @@ def collect() -> dict[str, np.ndarray]:
             nugget=default_nugget(1 / 10000, Z),
         )
         for who, arg in (("d", prior.squared_lengthscale), ("g", prior.nugget)):
-            shape_rate = (
-                (0.0, 0.0) if arg.prior is None else (arg.prior.shape, arg.prior.rate)
-            )
-            out[f"prior.{name}.{who}.start"] = np.atleast_1d(
-                np.asarray(arg.initial, float)
-            )
+            shape_rate = (0.0, 0.0) if arg.prior is None else (arg.prior.shape, arg.prior.rate)
+            out[f"prior.{name}.{who}.start"] = np.atleast_1d(np.asarray(arg.initial, float))
             out[f"prior.{name}.{who}.min"] = np.asarray(arg.lower, float)
             out[f"prior.{name}.{who}.max"] = np.asarray(arg.upper, float)
             out[f"prior.{name}.{who}.ab"] = np.asarray(shape_rate, float)

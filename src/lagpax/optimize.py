@@ -35,12 +35,8 @@ def with_implicit_gradient(
 
     hessian = jax.lax.stop_gradient(jax.hessian(objective)(solution))
     both_free = free[:, None] & free[None, :]
-    hessian = jnp.where(
-        both_free, hessian, jnp.eye(solution.shape[0], dtype=solution.dtype)
-    )
-    newton_step = jnp.linalg.solve(
-        hessian, jnp.where(free, jax.grad(objective)(solution), 0.0)
-    )
+    hessian = jnp.where(both_free, hessian, jnp.eye(solution.shape[0], dtype=solution.dtype))
+    newton_step = jnp.linalg.solve(hessian, jnp.where(free, jax.grad(objective)(solution), 0.0))
     newton_step = jnp.where(free & jnp.isfinite(newton_step), newton_step, 0.0)
     return solution - (newton_step - jax.lax.stop_gradient(newton_step))
 
@@ -61,9 +57,7 @@ def newton_maximize_on_interval(
     """
     dtype = jnp.result_type(start, lower, upper, float)
     lower, upper = jnp.asarray(lower, dtype), jnp.asarray(upper, dtype)
-    tolerance = (
-        math.sqrt(float(jnp.finfo(dtype).eps)) if tolerance is None else tolerance
-    )
+    tolerance = math.sqrt(float(jnp.finfo(dtype).eps)) if tolerance is None else tolerance
     slope_at_lower = first_and_second_derivative(lower)[0]
     slope_at_upper = first_and_second_derivative(upper)[0]
 
@@ -78,12 +72,8 @@ def newton_maximize_on_interval(
         bracket_high = jnp.where(slope > 0, bracket_high, point)
 
         newton = point - slope / jnp.where(curvature == 0, -1.0, curvature)
-        newton_is_safe = (
-            (newton > bracket_low) & (newton < bracket_high) & (curvature < 0)
-        )
-        following = jnp.where(
-            newton_is_safe, newton, 0.5 * (bracket_low + bracket_high)
-        )
+        newton_is_safe = (newton > bracket_low) & (newton < bracket_high) & (curvature < 0)
+        following = jnp.where(newton_is_safe, newton, 0.5 * (bracket_low + bracket_high))
         done = (
             (jnp.abs(slope) < tolerance)
             | (jnp.abs(following - point) < tolerance)

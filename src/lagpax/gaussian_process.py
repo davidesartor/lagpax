@@ -39,9 +39,7 @@ def trend_basis(trend: Trend, inputs: Float[Array, "n d"]) -> Float[Array, "n p"
 def as_floating(values: Any) -> Array:
     """`values` as an array in its own floating dtype, or JAX's default float for integers."""
     values = jnp.asarray(values)
-    return (
-        values if jnp.issubdtype(values.dtype, jnp.floating) else values.astype(float)
-    )
+    return values if jnp.issubdtype(values.dtype, jnp.floating) else values.astype(float)
 
 
 @pytree_dataclass
@@ -92,59 +90,30 @@ class GaussianProcess:
         trend: Trend = "zero",
     ) -> GaussianProcess:
         inputs = as_floating(inputs)
-        count, dimension = inputs.shape
+        count = inputs.shape[0]
         active = jnp.ones(count, bool) if active is None else active
         outputs = jnp.where(active, jnp.asarray(outputs, inputs.dtype), 0.0)
         basis = jnp.where(active[:, None], trend_basis(trend, inputs), 0.0)
-        hyperparameters = Hyperparameters(
-            jnp.broadcast_to(
-                jnp.atleast_1d(
-                    jnp.asarray(hyperparameters.squared_lengthscales, inputs.dtype)
-                ),
-                (dimension,),
-            ),
-            jnp.asarray(hyperparameters.nugget, inputs.dtype),
-        )
-
-        correlation_matrix = _masked_correlation(inputs, active, hyperparameters)
-        cholesky = jsp.linalg.cho_factor(correlation_matrix)
-        log_det_correlation = 2.0 * jnp.sum(jnp.log(jnp.diag(cholesky[0])))
-        inverse_correlation = jsp.linalg.cho_solve(
-            cholesky, jnp.eye(count, dtype=inputs.dtype)
-        )
-
-        trend_size = basis.shape[-1]
-        if trend_size == 0:
-            trend_coefficients = jnp.zeros((0,), inputs.dtype)
-            inverse_trend_information = jnp.zeros((0, 0), inputs.dtype)
-            log_det_trend_information = jnp.zeros((), inputs.dtype)
-            residuals = outputs
-        else:
-            whitened_basis = inverse_correlation @ basis
-            information_cholesky = jsp.linalg.cho_factor(basis.T @ whitened_basis)
-            log_det_trend_information = 2.0 * jnp.sum(
-                jnp.log(jnp.diag(information_cholesky[0]))
-            )
-            inverse_trend_information = jsp.linalg.cho_solve(
-                information_cholesky, jnp.eye(trend_size, dtype=inputs.dtype)
-            )
-            trend_coefficients = jsp.linalg.cho_solve(
-                information_cholesky, whitened_basis.T @ outputs
-            )
-            residuals = outputs - basis @ trend_coefficients
-
+        factors = _factorize(inputs, outputs, active, basis, hyperparameters)
+        trend_identity = jnp.eye(basis.shape[-1], dtype=inputs.dtype)
         return cls(
             inputs=inputs,
             outputs=outputs,
             active=active,
-            hyperparameters=hyperparameters,
+            hyperparameters=factors.hyperparameters,
             trend_basis=basis,
-            inverse_correlation=inverse_correlation,
-            log_det_correlation=log_det_correlation,
-            trend_coefficients=trend_coefficients,
-            inverse_trend_information=inverse_trend_information,
-            log_det_trend_information=log_det_trend_information,
-            residual_sum_of_squares=jnp.dot(residuals, inverse_correlation @ residuals),
+            inverse_correlation=jsp.linalg.cho_solve(
+                factors.cholesky, jnp.eye(count, dtype=inputs.dtype)
+            ),
+            log_det_correlation=factors.log_det_correlation,
+            trend_coefficients=factors.trend_coefficients,
+            inverse_trend_information=(
+                trend_identity
+                if factors.information_cholesky is None
+                else jsp.linalg.cho_solve(factors.information_cholesky, trend_identity)
+            ),
+            log_det_trend_information=factors.log_det_trend_information,
+            residual_sum_of_squares=factors.residual_sum_of_squares,
             trend=trend,
         )
 
@@ -207,15 +176,11 @@ class GaussianProcess:
     ) -> Prediction:
         """Student-t predictive at `new_inputs`; `include_nugget=False` predicts the latent surface."""
         dof = self.degrees_of_freedom
-        mean, scale = predictive_mean_and_scale(
-            self, new_inputs, include_nugget, full_covariance
-        )
+        mean, scale = predictive_mean_and_scale(self, new_inputs, include_nugget, full_covariance)
         variance = scale * dof / (dof - 2.0)
         if not full_covariance:
             return Prediction(mean, variance, dof, self.log_likelihood())
-        return Prediction(
-            mean, jnp.diagonal(variance), dof, self.log_likelihood(), variance
-        )
+        return Prediction(mean, jnp.diagonal(variance), dof, self.log_likelihood(), variance)
 
 
 def predictive_mean_and_scale(
@@ -236,9 +201,7 @@ def predictive_mean_and_scale(
     weights = cross.T @ gp.inverse_correlation
     mean = weights @ gp.residuals
     if full_covariance:
-        prior_correlation = correlation_with_nugget(
-            new_inputs, squared_lengthscales, nugget
-        )
+        prior_correlation = correlation_with_nugget(new_inputs, squared_lengthscales, nugget)
         unscaled = prior_correlation - weights @ cross
     else:
         unscaled = 1.0 + nugget - jnp.sum(weights.T * cross, axis=0)
@@ -248,8 +211,7 @@ def predictive_mean_and_scale(
         mean = mean + new_basis @ gp.trend_coefficients
         if full_covariance:
             unscaled = (
-                unscaled
-                + trend_uncertainty @ gp.inverse_trend_information @ trend_uncertainty.T
+                unscaled + trend_uncertainty @ gp.inverse_trend_information @ trend_uncertainty.T
             )
         else:
             unscaled = unscaled + jnp.sum(
@@ -267,58 +229,71 @@ def log_likelihood_at(
     The objective every hyperparameter solve iterates on, so it skips the explicit inverse that
     `from_data` keeps for prediction and design criteria.
     """
-    squared_lengthscales = jnp.broadcast_to(
-        jnp.atleast_1d(
-            jnp.asarray(hyperparameters.squared_lengthscales, gp.inputs.dtype)
-        ),
-        (gp.dimension,),
+    factors = _factorize(gp.inputs, gp.outputs, gp.active, gp.trend_basis, hyperparameters)
+    log_likelihood = _profiled_log_likelihood(
+        gp.degrees_of_freedom,
+        factors.log_det_correlation,
+        factors.log_det_trend_information,
+        factors.residual_sum_of_squares,
     )
-    correlation_matrix = _masked_correlation(
-        gp.inputs,
-        gp.active,
-        Hyperparameters(squared_lengthscales, hyperparameters.nugget),
+    return _with_log_prior(log_likelihood, prior, factors.hyperparameters)
+
+
+class _Factors(NamedTuple):
+    hyperparameters: Hyperparameters
+    cholesky: tuple[Float[Array, "n n"], bool]
+    log_det_correlation: Scalar
+    information_cholesky: Optional[tuple[Float[Array, "p p"], bool]]
+    log_det_trend_information: Scalar
+    trend_coefficients: Float[Array, "p"]
+    residual_sum_of_squares: Scalar
+
+
+def _factorize(
+    inputs: Float[Array, "n d"],
+    outputs: Float[Array, "n"],
+    active: Bool[Array, "n"],
+    basis: Float[Array, "n p"],
+    hyperparameters: Hyperparameters,
+) -> _Factors:
+    """Cholesky of the masked correlation, the trend's GLS fit, and the residual sum of squares."""
+    count, dimension = inputs.shape
+    squared_lengthscales = jnp.broadcast_to(
+        jnp.atleast_1d(jnp.asarray(hyperparameters.squared_lengthscales, inputs.dtype)),
+        (dimension,),
+    )
+    hyperparameters = Hyperparameters(
+        squared_lengthscales, jnp.asarray(hyperparameters.nugget, inputs.dtype)
+    )
+    correlation_matrix = jnp.where(
+        active[:, None] & active[None, :],
+        correlation_with_nugget(inputs, squared_lengthscales, hyperparameters.nugget),
+        jnp.eye(count, dtype=inputs.dtype),
     )
     cholesky = jsp.linalg.cho_factor(correlation_matrix)
     log_det_correlation = 2.0 * jnp.sum(jnp.log(jnp.diag(cholesky[0])))
 
-    if gp.trend_size == 0:
-        residuals = gp.outputs
-        log_det_trend_information = jnp.zeros((), gp.inputs.dtype)
+    if basis.shape[-1] == 0:
+        information_cholesky = None
+        log_det_trend_information = jnp.zeros((), inputs.dtype)
+        trend_coefficients = jnp.zeros((0,), inputs.dtype)
+        residuals = outputs
     else:
-        whitened_basis = jsp.linalg.cho_solve(cholesky, gp.trend_basis)
-        information_cholesky = jsp.linalg.cho_factor(gp.trend_basis.T @ whitened_basis)
-        log_det_trend_information = 2.0 * jnp.sum(
-            jnp.log(jnp.diag(information_cholesky[0]))
-        )
-        coefficients = jsp.linalg.cho_solve(
-            information_cholesky, whitened_basis.T @ gp.outputs
-        )
-        residuals = gp.outputs - gp.trend_basis @ coefficients
-    residual_sum_of_squares = jnp.dot(
-        residuals, jsp.linalg.cho_solve(cholesky, residuals)
-    )
-    return _with_log_prior(
-        _profiled_log_likelihood(
-            gp.degrees_of_freedom,
-            log_det_correlation,
-            log_det_trend_information,
-            residual_sum_of_squares,
-        ),
-        prior,
-        Hyperparameters(squared_lengthscales, hyperparameters.nugget),
-    )
+        whitened_basis = jsp.linalg.cho_solve(cholesky, basis)
+        information_cholesky = jsp.linalg.cho_factor(basis.T @ whitened_basis)
+        log_det_trend_information = 2.0 * jnp.sum(jnp.log(jnp.diag(information_cholesky[0])))
+        trend_coefficients = jsp.linalg.cho_solve(information_cholesky, whitened_basis.T @ outputs)
+        residuals = outputs - basis @ trend_coefficients
 
-
-def _masked_correlation(
-    inputs: Float[Array, "n d"],
-    active: Bool[Array, "n"],
-    hyperparameters: Hyperparameters,
-) -> Float[Array, "n n"]:
-    full = correlation_with_nugget(
-        inputs, hyperparameters.squared_lengthscales, hyperparameters.nugget
+    return _Factors(
+        hyperparameters,
+        cholesky,
+        log_det_correlation,
+        information_cholesky,
+        log_det_trend_information,
+        trend_coefficients,
+        jnp.dot(residuals, jsp.linalg.cho_solve(cholesky, residuals)),
     )
-    both_active = active[:, None] & active[None, :]
-    return jnp.where(both_active, full, jnp.eye(inputs.shape[0], dtype=inputs.dtype))
 
 
 def _profiled_log_likelihood(
@@ -340,11 +315,7 @@ def _with_log_prior(
     if prior is None:
         return log_likelihood
     if prior.kernel.prior is not None:
-        kernel_values = prior.from_squared_lengthscales(
-            hyperparameters.squared_lengthscales
-        )
+        kernel_values = prior.from_squared_lengthscales(hyperparameters.squared_lengthscales)
         densities = prior.kernel.prior.log_density(kernel_values)
-        log_likelihood = log_likelihood + jnp.sum(
-            jnp.where(kernel_values > 0, densities, 0.0)
-        )
+        log_likelihood = log_likelihood + jnp.sum(jnp.where(kernel_values > 0, densities, 0.0))
     return log_likelihood + prior.nugget_log_density(hyperparameters.nugget)

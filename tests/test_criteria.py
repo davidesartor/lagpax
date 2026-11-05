@@ -3,9 +3,9 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
+from helpers import make_gp
 
 import lagpax as lagp
-from helpers import make_gp
 
 D = np.array([0.3, 0.7, 1.1])
 G = 1e-3
@@ -26,9 +26,7 @@ def test_alc_matches_r_single_reference(R, small):
     Xd, Zd, Xcand, Xref = _split(small, nref=1)
     gp = make_gp(jnp.array(Xd), jnp.array(Zd), jnp.array(D), G)
     got = np.asarray(lagp.ActiveLearningCohn()(gp, jnp.array(Xcand), jnp.array(Xref)))
-    want = np.asarray(
-        R(ALC, X=Xd, Z=Zd, d=D, g=np.array([G]), Xcand=Xcand, Xref=Xref)
-    ).ravel()
+    want = np.asarray(R(ALC, X=Xd, Z=Zd, d=D, g=np.array([G]), Xcand=Xcand, Xref=Xref)).ravel()
     np.testing.assert_allclose(got, want, rtol=1e-9, atol=1e-14)
 
 
@@ -36,9 +34,7 @@ def test_alc_matches_r_multiple_references(R, small):
     Xd, Zd, Xcand, Xref = _split(small)
     gp = make_gp(jnp.array(Xd), jnp.array(Zd), jnp.array(D), G)
     got = np.asarray(lagp.ActiveLearningCohn()(gp, jnp.array(Xcand), jnp.array(Xref)))
-    want = np.asarray(
-        R(ALC, X=Xd, Z=Zd, d=D, g=np.array([G]), Xcand=Xcand, Xref=Xref)
-    ).ravel()
+    want = np.asarray(R(ALC, X=Xd, Z=Zd, d=D, g=np.array([G]), Xcand=Xcand, Xref=Xref)).ravel()
     np.testing.assert_allclose(got, want, rtol=1e-9, atol=1e-14)
 
 
@@ -48,9 +44,7 @@ def test_alc_matches_r_on_a_wider_design(R, wide):
     Xd, Zd, Xcand, Xref = X[:150], Z[:150], X[150:180], X[180:] + 0.01
     gp = make_gp(jnp.array(Xd), jnp.array(Zd), jnp.array(d), G)
     got = np.asarray(lagp.ActiveLearningCohn()(gp, jnp.array(Xcand), jnp.array(Xref)))
-    want = np.asarray(
-        R(ALC, X=Xd, Z=Zd, d=d, g=np.array([G]), Xcand=Xcand, Xref=Xref)
-    ).ravel()
+    want = np.asarray(R(ALC, X=Xd, Z=Zd, d=d, g=np.array([G]), Xcand=Xcand, Xref=Xref)).ravel()
     np.testing.assert_allclose(got, want, rtol=1e-9, atol=1e-14)
 
 
@@ -65,9 +59,7 @@ def test_alc_prefers_candidates_near_the_reference(small):
     Xd, Zd, _, Xref = _split(small, nref=1)
     gp = make_gp(jnp.array(Xd), jnp.array(Zd), jnp.array(D), G)
     Xcand = np.vstack([Xref[0] + 0.01, Xref[0] + 5.0])
-    near, far = np.asarray(
-        lagp.ActiveLearningCohn()(gp, jnp.array(Xcand), jnp.array(Xref))
-    )
+    near, far = np.asarray(lagp.ActiveLearningCohn()(gp, jnp.array(Xcand), jnp.array(Xref)))
     assert near > far
 
 
@@ -88,6 +80,4 @@ def test_alc_is_jittable_and_vmappable(small):
     alc = lagp.ActiveLearningCohn()
     single = jax.jit(alc)(gp, jnp.array(Xcand), jnp.array(Xref))
     batched = jax.vmap(lambda x: alc(gp, x[None, :], jnp.array(Xref)))(jnp.array(Xcand))
-    np.testing.assert_allclose(
-        np.asarray(single), np.asarray(batched).ravel(), rtol=1e-9
-    )
+    np.testing.assert_allclose(np.asarray(single), np.asarray(batched).ravel(), rtol=1e-9)

@@ -31,12 +31,8 @@ def run() -> pd.DataFrame:
                 X, Z, XX = design(seed=seed, **case)
                 # both sides get the same prior; the default's own subsample is RNG-dependent
                 d = default_squared_lengthscale(None, X, key=jax.random.key(seed))
-                prior = Prior(
-                    squared_lengthscale=d, nugget=default_nugget(1 / 10000, Z)
-                )
-                model = lagp.LocalGP(
-                    initial_neighbors=START, neighbors=END, criterion=method
-                )
+                prior = Prior(squared_lengthscale=d, nugget=default_nugget(1 / 10000, Z))
+                model = lagp.LocalGP(initial_neighbors=START, neighbors=END, criterion=method)
                 ours = model.fit(X, Z, prior=prior)(XX)
                 mean, var = R.agp(X, Z, XX, START, END, method, d=d)
 
@@ -51,8 +47,7 @@ def run() -> pd.DataFrame:
                         mean_rel_err_max=float(mean_err.max()),
                         mean_rel_err_med=float(np.median(mean_err)),
                         mean_rmse_over_sd=float(
-                            np.sqrt(np.mean((np.asarray(ours.mean) - mean) ** 2))
-                            / spread
+                            np.sqrt(np.mean((np.asarray(ours.mean) - mean) ** 2)) / spread
                         ),
                         var_rel_err_max=float(var_err.max()),
                         var_rel_err_med=float(np.median(var_err)),

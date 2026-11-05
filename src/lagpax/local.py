@@ -106,24 +106,16 @@ class LocalGP:
         outputs = jnp.asarray(outputs, inputs.dtype)
         count = inputs.shape[0]
         if outputs.shape != (count,):
-            raise ValueError(
-                "outputs must be a vector with one entry per row of inputs"
-            )
+            raise ValueError("outputs must be a vector with one entry per row of inputs")
         if not 6 <= self.initial_neighbors < self.neighbors:
             raise ValueError("need 6 <= initial_neighbors < neighbors")
         if count <= self.neighbors:
             raise ValueError("need more training points than neighbors")
 
-        scores_every_candidate = not isinstance(
-            self.search, (RaySearch, ContinuousSearch)
-        )
-        default_candidates = (1000 + self.neighbors) * (
-            1 if scores_every_candidate else 10
-        )
+        scores_every_candidate = not isinstance(self.search, (RaySearch, ContinuousSearch))
+        default_candidates = (1000 + self.neighbors) * (1 if scores_every_candidate else 10)
         candidates = (
-            min(default_candidates, count)
-            if self.candidates is None
-            else int(self.candidates)
+            min(default_candidates, count) if self.candidates is None else int(self.candidates)
         )
         if not self.neighbors < candidates <= count:
             raise ValueError("need neighbors < candidates <= number of training points")
@@ -155,11 +147,9 @@ class Emulator(NamedTuple):
         `initial_squared_lengthscales` overrides where design selection and the fit start
         (clipped into the prior's bounds).
         """
-        references = jnp.atleast_2d(jnp.asarray(references, self.inputs.dtype))
-        if references.shape[-1] != self.inputs.shape[-1]:
-            raise ValueError("references and inputs have different numbers of columns")
+        references = self._as_points(references)
         start = self._starting_squared_lengthscales(
-            initial_squared_lengthscales, (self.inputs.shape[-1],)
+            initial_squared_lengthscales, (references.shape[-1],)
         )
         return _predict_local(self, references, start, full_covariance=full_covariance)
 
@@ -174,19 +164,14 @@ class Emulator(NamedTuple):
         `batch_size` bounds how many points are in flight at once (`lax.map`'s); it trades
         memory for throughput and does not change the results.
         """
-        new_inputs = jnp.atleast_2d(jnp.asarray(new_inputs, self.inputs.dtype))
-        if new_inputs.shape[-1] != self.inputs.shape[-1]:
-            raise ValueError("new_inputs and inputs have different numbers of columns")
-        starts = self._starting_squared_lengthscales(
-            initial_squared_lengthscales, new_inputs.shape
-        )
-
-        def predict_one(point_and_start):
-            point, start = point_and_start
-            return self.predict_local(point[None, :], start)
-
+        new_inputs = self._as_points(new_inputs)
+        starts = self._starting_squared_lengthscales(initial_squared_lengthscales, new_inputs.shape)
         predictions = jax.lax.map(
-            predict_one, (new_inputs, starts), batch_size=batch_size
+            lambda point_and_start: _predict_local(
+                self, point_and_start[0][None], point_and_start[1], full_covariance=False
+            ),
+            (new_inputs, starts),
+            batch_size=batch_size,
         )
         return predictions._replace(
             mean=predictions.mean[:, 0], variance=predictions.variance[:, 0]
@@ -206,7 +191,7 @@ class Emulator(NamedTuple):
         """
         if not passes:
             raise ValueError("passes must name at least one pass")
-        new_inputs = jnp.atleast_2d(jnp.asarray(new_inputs, self.inputs.dtype))
+        new_inputs = self._as_points(new_inputs)
         starts = self._starting_squared_lengthscales(None, new_inputs.shape)
         for criterion in passes:
             emulator = self._replace(model=self.model.replace(criterion=criterion))
@@ -214,6 +199,12 @@ class Emulator(NamedTuple):
             fitted = prediction.fit.squared_lengthscales
             starts = jnp.where(jnp.isfinite(fitted), fitted, starts)
         return prediction
+
+    def _as_points(self, points: Float[Array, "m d"]) -> Float[Array, "m d"]:
+        points = jnp.atleast_2d(jnp.asarray(points, self.inputs.dtype))
+        if points.shape[-1] != self.inputs.shape[-1]:
+            raise ValueError("points and training inputs have different numbers of columns")
+        return points
 
     def _starting_squared_lengthscales(
         self, requested: Optional[Float[Array, "..."]], shape: tuple[int, ...]
@@ -246,9 +237,7 @@ def _predict_local(
         starting_squared_lengthscales,
         jnp.asarray(emulator.prior.nugget.initial, emulator.inputs.dtype),
     )
-    distance_to_references = jnp.min(
-        squared_distances(references, emulator.inputs), axis=0
-    )
+    distance_to_references = jnp.min(squared_distances(references, emulator.inputs), axis=0)
     pool = jax.lax.top_k(-distance_to_references, model.candidates)[1]
     pool_inputs, pool_outputs = emulator.inputs[pool], emulator.outputs[pool]
 
@@ -264,10 +253,7 @@ def _predict_local(
             ]
         )
         candidate_correlation = None
-        if (
-            criterion.reuses_candidate_correlation
-            and search.reuses_candidate_correlation
-        ):
+        if criterion.reuses_candidate_correlation and search.reuses_candidate_correlation:
             candidate_correlation = (
                 jnp.zeros((model.candidates, neighbors), pool_inputs.dtype)
                 .at[:, :initial]
@@ -280,9 +266,7 @@ def _predict_local(
                 )
             )
         state = DesignState(
-            chosen=jnp.concatenate(
-                [jnp.arange(initial), jnp.zeros(neighbors - initial, int)]
-            ),
+            chosen=jnp.concatenate([jnp.arange(initial), jnp.zeros(neighbors - initial, int)]),
             active=jnp.arange(neighbors) < initial,
             taken=jnp.arange(model.candidates) < initial,
             candidate_correlation=candidate_correlation,
@@ -319,9 +303,7 @@ def _predict_local(
                         pool_inputs[pick][None],
                         starting.squared_lengthscales,
                     )[:, 0]
-                    updated_correlation = updated_correlation.at[:, step].set(
-                        new_column
-                    )
+                    updated_correlation = updated_correlation.at[:, step].set(new_column)
                 return DesignState(
                     state.chosen.at[step].set(pick),
                     state.active.at[step].set(True),
@@ -332,9 +314,7 @@ def _predict_local(
             return body
 
         for first_step, end_step, capacity in design_buckets(initial, neighbors):
-            state = jax.lax.fori_loop(
-                first_step, end_step, add_one_point(capacity), state
-            )
+            state = jax.lax.fori_loop(first_step, end_step, add_one_point(capacity), state)
         design = state.chosen
 
     gp = GaussianProcess.from_data(

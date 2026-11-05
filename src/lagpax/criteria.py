@@ -62,9 +62,7 @@ class ActiveLearningCohn(Criterion):
         expected = jnp.mean(
             gp.residual_sum_of_squares * reduction / dof * (dof / (dof - 2.0)), axis=-1
         )
-        return jnp.where(
-            conditional_variance <= ROOT_MACHINE_EPSILON, -jnp.inf, expected
-        )
+        return jnp.where(conditional_variance <= ROOT_MACHINE_EPSILON, -jnp.inf, expected)
 
 
 @pytree_dataclass
@@ -103,9 +101,7 @@ class IntegratedExpectedConditionalImprovement(Criterion):
         student_t_cdf = jnp.where(standardized <= 0, tail, 1.0 - tail)
         improvement = scale * (
             standardized * student_t_cdf
-            + (dof + jnp.square(standardized))
-            / (dof - 1.0)
-            * jnp.exp(student_t_log_density)
+            + (dof + jnp.square(standardized)) / (dof - 1.0) * jnp.exp(student_t_log_density)
         )
         if self.weights is not None:
             improvement = self.weights * improvement
@@ -149,9 +145,7 @@ def variance_reduction(
 
     weights = candidate_correlation @ gp.inverse_correlation
     conditional_variance = (
-        1.0
-        + gp.hyperparameters.nugget
-        - jnp.sum(candidate_correlation * weights, axis=-1)
+        1.0 + gp.hyperparameters.nugget - jnp.sum(candidate_correlation * weights, axis=-1)
     )
     weights = -weights / conditional_variance[:, None]
 

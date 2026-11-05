@@ -20,11 +20,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import vlse
+from helpers import fit_both, lagp_prior, make_gp
 
 import lagpax as lagp
-from helpers import make_gp
-from lagpax.fitting import fit_jointly
-from helpers import lagp_prior
 from lagpax.priors import Prior, default_nugget, default_squared_lengthscale
 
 SURFACES = {
@@ -69,7 +67,7 @@ def test_joint_fit_on_test_functions(R, name):
 
     gp = make_gp(jnp.asarray(X), jnp.asarray(Z), jnp.asarray(d0), g0)
     prior = lagp_prior(DAB, GAB, DRANGE, GRANGE)
-    _, ours = fit_jointly(gp, prior)
+    _, ours = fit_both(gp, prior)
     want = np.asarray(
         R(
             "gpi <- newGPsep(X, Z, d=d, g=g, dK=TRUE); "
@@ -91,9 +89,7 @@ def test_joint_fit_on_test_functions(R, name):
         1.0, abs(theirs)
     )
     if name in UNIMODAL_FIT:
-        np.testing.assert_allclose(
-            np.asarray(ours.squared_lengthscales), want[:m], rtol=1e-3
-        )
+        np.testing.assert_allclose(np.asarray(ours.squared_lengthscales), want[:m], rtol=1e-3)
         assert float(ours.nugget) == pytest.approx(want[m], rel=1e-3)
 
 

@@ -18,10 +18,7 @@ CASES = (
 # laGP is linear in the number of predictive locations while we are nearly flat until the
 # GPU saturates, so the location count -- not n -- is what the ratio actually turns on.
 # The last point is jax-only territory: laGP needs about an hour of 16 cores to reach it.
-LOCATIONS = [
-    dict(n=8000, nn=nn, m=4, seeds=1)
-    for nn in (250, 1000, 4000, 16_000, 64_000, 256_000)
-]
+LOCATIONS = [dict(n=8000, nn=nn, m=4, seeds=1) for nn in (250, 1000, 4000, 16_000, 64_000, 256_000)]
 
 SUITES = {"default": CASES, "locations": LOCATIONS}
 START, END = 6, 50
@@ -66,9 +63,7 @@ def run(
     backend = jax_backend()
     # cpu_count reports the machine; the cgroup/scheduler affinity is what we actually get
     cores = len(os.sched_getaffinity(0))
-    engines = {
-        f"jax-{backend}-{cores}core" if backend == "cpu" else f"jax-{backend}": None
-    }
+    engines = {f"jax-{backend}-{cores}core" if backend == "cpu" else f"jax-{backend}": None}
     if not skip_r:
         # single-core laGP owns the budget at large nn, so it can be dropped on its own
         for spec in dict.fromkeys(cores if t == "all" else int(t) for t in r_threads):
@@ -118,7 +113,5 @@ if __name__ == "__main__":
     suite = SUITES[a.suite]
     cases = suite if a.cases is None else [suite[i] for i in a.cases]
     print(
-        run(a.methods, a.batch, a.skip_r, a.out, cases, a.seeds, a.r_threads).to_string(
-            index=False
-        )
+        run(a.methods, a.batch, a.skip_r, a.out, cases, a.seeds, a.r_threads).to_string(index=False)
     )

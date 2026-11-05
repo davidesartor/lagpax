@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from lagpax import GammaPrior, GaussianProcess, Hyperparameters, Param, Prior
+from lagpax import GammaPrior, GaussianProcess, Hyperparameters, Param, Prior, fit_hyperparameters
 from lagpax.gaussian_process import Trend, log_likelihood_at
 
 
@@ -60,3 +60,20 @@ def lagp_prior(
 def log_likelihood_gradient(gp: GaussianProcess, prior: Optional[Prior] = None):
     """d log-likelihood / d (squared lengthscales, nugget) at the process's hyperparameters."""
     return jax.grad(lambda h: log_likelihood_at(gp, h, prior))(gp.hyperparameters)
+
+
+def learning(prior: Prior, kernel: bool, nugget: bool) -> Prior:
+    """The same prior with its `learn` flags set."""
+    return prior.replace(**{prior.kernel_space: Param(learn=kernel)}, nugget=Param(learn=nugget))
+
+
+def fit_kernel_only(gp: GaussianProcess, prior: Prior, **options):
+    return fit_hyperparameters(gp, learning(prior, True, False), **options)
+
+
+def fit_nugget_only(gp: GaussianProcess, prior: Prior, **options):
+    return fit_hyperparameters(gp, learning(prior, False, True), **options)
+
+
+def fit_both(gp: GaussianProcess, prior: Prior, **options):
+    return fit_hyperparameters(gp, learning(prior, True, True), **options)

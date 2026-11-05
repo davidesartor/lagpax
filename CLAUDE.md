@@ -78,7 +78,8 @@ the parity suite targets — check out the tag.
 
 ## src/lagpax
 
-Written to read without comments and to stay tight: descriptive names, type hints everywhere
+Formatted by `ruff format` at 100 columns (`[tool.ruff]` in `pyproject.toml`). Written to read
+without comments and to stay tight: descriptive names, type hints everywhere
 (jaxtyping shapes on every array), docstrings on what is public, an inline comment only where a
 name cannot carry the reason, and **code used once is inlined** — a helper exists only if it has
 two or more callers, is public API, or is a unit a test exercises directly (`design_buckets`,
@@ -106,20 +107,24 @@ as `residual_sum_of_squares = r' K^-1 r`, and a Student-t predictive with
 - `gaussian_process.py` — `Hyperparameters`, `Prediction`, and `GaussianProcess`, a pytree
   dataclass built by `GaussianProcess.from_data(inputs, outputs, hyperparameters, active, trend)`
   that caches `inverse_correlation` (ALC needs it), `log_det_correlation`,
-  `residual_sum_of_squares` and the trend's GLS pieces. `log_likelihood_at(gp, hyperparameters)`
-  is the fit's objective: one Cholesky, no inverse. `predictive_mean_and_scale` (per point or
+  `residual_sum_of_squares` and the trend's GLS pieces. `from_data` and `log_likelihood_at` (the
+  fit's objective) share one `_factorize`: masked Cholesky, GLS trend, residual sum of squares, all
+  by Cholesky solves; only `from_data` then forms the explicit inverse. `predictive_mean_and_scale` (per point or
   `full_covariance`) gives the Student-t *scale*; `predict` and the criteria both use it, and
   `Prediction` only ever carries the variance.
 - `optimize.py` — `with_implicit_gradient` (the derivative of an argmin, attached to a solver's
   answer), `newton_maximize_on_interval` (the nugget solver), and `R_OPTIM_RELATIVE_TOLERANCE`,
   R's `factr=1e7` times *float64's* epsilon in every dtype (float32's would make it ~1.2 and stop
   every fit after one step). L-BFGS-B is `vlse.optim.minimise`, called directly.
-- `fitting.py` — `fit_hyperparameters` dispatching on the prior's `learn` flags to
-  `fit_squared_lengthscales`, `fit_nugget` or `fit_jointly` (laGP's jmleGPsep alternation, carrying
-  `(kernel values, nugget)` through its `while_loop`, not a GP). All return
-  `(GaussianProcess, FitResult(squared_lengthscales, nugget, iterations, converged))`. The kernel
-  solve runs in the prior's space; `_kernel_log_posterior` keeps laGP's summation order
-  (likelihood, then kernel prior, then nugget prior), so squared-lengthscale fits are laGP's.
+- `fitting.py` — one `fit_hyperparameters(gp, prior)`: L-BFGS-B on the kernel parameter (in the
+  prior's space), Newton on the nugget, or laGP's jmleGPsep alternation of the two when both are
+  learned — chosen by the prior's `learn` flags. Returns `(GaussianProcess, FitResult(
+  squared_lengthscales, nugget, iterations, converged))`. Hyperparameters that are not learned
+  keep their exact values and their upstream gradients (the implicit gradient only covers learned
+  coordinates). `_kernel_log_posterior` keeps laGP's summation order (likelihood, then kernel
+  prior, then nugget prior), so squared-lengthscale fits are laGP's. Tests reach the
+  single-parameter cases through `tests/helpers.py` (`fit_kernel_only`, `fit_nugget_only`,
+  `fit_both`).
 - `criteria.py` — `Criterion` subclasses `NearestNeighbor`, `ActiveLearningCohn`,
   `IntegratedExpectedConditionalImprovement(best_observed, weights=, include_nugget=)` and
   `CustomCriterion`. Class attributes `lower_is_better` and `reuses_candidate_correlation`.
@@ -216,7 +221,7 @@ prior = prior.replace(nugget=lagpax.Param(learn=True))
 gp = lagpax.GaussianProcess.from_data(inputs, outputs, lagpax.Hyperparameters(s, nugget))
 gp.log_likelihood(prior=None); gp.predict(new_inputs, full_covariance=False, include_nugget=True)
 gp.with_hyperparameters(h); gp.with_observations(more_inputs, more_outputs)
-gp, result = lagpax.fit_hyperparameters(gp, prior)   # FitResult(squared_lengthscales, nugget, ...)
+gp, result = lagpax.fit_hyperparameters(gp, prior)   # fits what prior.*.learn marks
 
 lagpax.ActiveLearningCohn()(gp, candidates, references)   # criteria: -> one score per candidate
 ```

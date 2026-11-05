@@ -110,9 +110,7 @@ class RaySearch(Search):
             score_along_rays, zeros, zeros + 1.0, self.golden_section_steps
         )
         best_ray = jnp.argmax(jnp.where(jnp.isfinite(values), values, -jnp.inf))
-        best_point = (ray_starts + fractions[:, None] * (ray_ends - ray_starts))[
-            best_ray
-        ]
+        best_point = (ray_starts + fractions[:, None] * (ray_ends - ray_starts))[best_ray]
         return nearest_untaken(best_point[None], candidates, taken)
 
 
@@ -176,9 +174,7 @@ def nearest_untaken(
     return jnp.argmin(jnp.where(taken, jnp.inf, distances))
 
 
-def untaken_by_rank(
-    taken: Bool[Array, "c"], first_rank: Scalar, count: int
-) -> Int[Array, "count"]:
+def untaken_by_rank(taken: Bool[Array, "c"], first_rank: Scalar, count: int) -> Int[Array, "count"]:
     """Indices of the untaken candidates ranked `first_rank, first_rank + 1, ...` by distance.
 
     laGP removes chosen points from its candidate list, so "the k-th candidate" means the k-th
@@ -186,9 +182,7 @@ def untaken_by_rank(
     each one's rank, and `searchsorted` inverts it in linear time where an argsort would not be.
     """
     available_so_far = jnp.cumsum(~taken)
-    ranks = jnp.mod(
-        first_rank + jnp.arange(count), jnp.maximum(available_so_far[-1], 1)
-    )
+    ranks = jnp.mod(first_rank + jnp.arange(count), jnp.maximum(available_so_far[-1], 1))
     return jnp.searchsorted(available_so_far, ranks + 1, side="left")
 
 
@@ -210,12 +204,8 @@ def _golden_section_maximize(
             jnp.where(keep_left, probe_high, high),
         )
         probe_low, probe_high = (
-            jnp.where(
-                keep_left, high - GOLDEN_RATIO_CONJUGATE * (high - low), probe_high
-            ),
-            jnp.where(
-                keep_left, probe_low, low + GOLDEN_RATIO_CONJUGATE * (high - low)
-            ),
+            jnp.where(keep_left, high - GOLDEN_RATIO_CONJUGATE * (high - low), probe_high),
+            jnp.where(keep_left, probe_low, low + GOLDEN_RATIO_CONJUGATE * (high - low)),
         )
         value_new = function(jnp.where(keep_left, probe_low, probe_high))
         return (
@@ -252,9 +242,7 @@ def _ray_ends(
     """Cast each ray ten times its start's distance from the reference, then pull it back to
     where it first leaves the bounding box (laGP's ray.end)."""
     direction = 10.0 * (ray_starts - reference)
-    room = jnp.where(
-        direction > 0, bounding_box[1] - ray_starts, bounding_box[0] - ray_starts
-    )
+    room = jnp.where(direction > 0, bounding_box[1] - ray_starts, bounding_box[0] - ray_starts)
     nonzero = jnp.where(direction != 0.0, direction, 1.0)
     fraction = jnp.min(jnp.where(direction != 0.0, room / nonzero, jnp.inf), axis=-1)
     return ray_starts + jnp.clip(fraction, 0.0, 1.0)[:, None] * direction

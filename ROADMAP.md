@@ -244,6 +244,12 @@ that say what a thing is so the code needs no comments, and type hints on everyt
   the greedy design loop into `_predict_local`, the Student-t expected improvement into its
   criterion, single-use constants and samplers), and `predict`'s full-covariance branch now shares
   `predictive_mean_and_scale` instead of repeating it. 2,040 -> 1,980 lines, snapshot bit-identical.
+- **Tightened again:** one `fit_hyperparameters` replaces the kernel-only, nugget-only and joint
+  fits (unlearned hyperparameters keep exact values and gradients); `from_data` and
+  `log_likelihood_at` share one Cholesky-based `_factorize`; `Prior.replace` is a generic loop; the
+  formatter runs at 100 columns. 1,980 -> 1,765 lines. The shared factorization computes the
+  residual sum of squares by Cholesky solve instead of through the explicit inverse, which moves
+  values by up to 1.6e-11 (85/124 snapshot arrays bit-identical); strict suite unchanged.
 - **Tests did not move a tolerance.** Every module was ported to the new names and passes as
   before; the `Igamma.inv` test became a parity test of `GammaPrior.with_mass_below`, and the
   analytic-derivative test of the kernel went with `dcorrelation` (autodiff covers it).

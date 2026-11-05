@@ -33,9 +33,7 @@ class GammaPrior:
     rate: float
 
     @classmethod
-    def with_mass_below(
-        cls, upper: float, shape: float = 1.5, mass: float = 0.95
-    ) -> GammaPrior:
+    def with_mass_below(cls, upper: float, shape: float = 1.5, mass: float = 0.95) -> GammaPrior:
         """The Gamma(shape, rate) putting `mass` of its probability below `upper`."""
         return cls(shape, float(scipy.special.gammaincinv(shape, mass)) / upper)
 
@@ -97,36 +95,24 @@ class Prior:
 
     def __post_init__(self) -> None:
         if (self.squared_lengthscale is None) == (self.lengthscale is None):
-            raise ValueError(
-                "give exactly one of squared_lengthscale= and lengthscale="
-            )
+            raise ValueError("give exactly one of squared_lengthscale= and lengthscale=")
 
     @property
     def kernel_space(self) -> KernelSpace:
-        return (
-            "squared_lengthscale"
-            if self.squared_lengthscale is not None
-            else "lengthscale"
-        )
+        return "squared_lengthscale" if self.squared_lengthscale is not None else "lengthscale"
 
     @property
     def kernel(self) -> Param:
         return (
-            self.squared_lengthscale
-            if self.squared_lengthscale is not None
-            else self.lengthscale
+            self.squared_lengthscale if self.squared_lengthscale is not None else self.lengthscale
         )
 
-    def to_squared_lengthscales(
-        self, kernel_values: Float[Array, "d"]
-    ) -> Float[Array, "d"]:
+    def to_squared_lengthscales(self, kernel_values: Float[Array, "d"]) -> Float[Array, "d"]:
         if self.kernel_space == "squared_lengthscale":
             return kernel_values
         return 2.0 * jnp.square(kernel_values)
 
-    def from_squared_lengthscales(
-        self, squared: Float[Array, "d"]
-    ) -> Float[Array, "d"]:
+    def from_squared_lengthscales(self, squared: Float[Array, "d"]) -> Float[Array, "d"]:
         if self.kernel_space == "squared_lengthscale":
             return squared
         return jnp.sqrt(0.5 * squared)
@@ -136,33 +122,16 @@ class Prior:
             return jnp.zeros((), jnp.result_type(nugget))
         return jnp.where(nugget > 0, self.nugget.prior.log_density(nugget), 0.0)
 
-    def replace(
-        self,
-        squared_lengthscale: ParamSpec = None,
-        lengthscale: ParamSpec = None,
-        nugget: ParamSpec = None,
-    ) -> Prior:
-        """Override the given fields of this prior's Params, keeping everything left unset."""
-        updated = self
-        if nugget is not None:
-            updated = dataclasses.replace(
-                updated, nugget=updated.nugget.overridden_by(as_param(nugget))
-            )
-        for name, spec in (
-            ("squared_lengthscale", squared_lengthscale),
-            ("lengthscale", lengthscale),
-        ):
-            if spec is None:
-                continue
-            current = getattr(updated, name)
+    def replace(self, **specs: ParamSpec) -> Prior:
+        """Override fields of the named Params (`nugget`, `squared_lengthscale`, `lengthscale`),
+        keeping everything left unset."""
+        changes = {}
+        for name, spec in specs.items():
+            current = getattr(self, name)
             if current is None:
-                raise ValueError(
-                    f"this prior has no {name}; it is in the other kernel space"
-                )
-            updated = dataclasses.replace(
-                updated, **{name: current.overridden_by(as_param(spec))}
-            )
-        return updated
+                raise ValueError(f"this prior has no {name}; it is in the other kernel space")
+            changes[name] = current.overridden_by(as_param(spec))
+        return dataclasses.replace(self, **changes)
 
     @classmethod
     def from_data(
@@ -223,9 +192,7 @@ class Prior:
 
 
 def _squared(lengthscale: Union[float, np.ndarray, None]) -> Union[np.ndarray, None]:
-    return (
-        None if lengthscale is None else 2.0 * np.square(np.asarray(lengthscale, float))
-    )
+    return None if lengthscale is None else 2.0 * np.square(np.asarray(lengthscale, float))
 
 
 def _rooted(squared: Union[float, np.ndarray]) -> np.ndarray:
@@ -278,9 +245,7 @@ def default_squared_lengthscale(
         else (0.0, 0.0, 0.0)
     )
 
-    initial = np.atleast_1d(
-        np.asarray(start if spec.initial is None else spec.initial, float)
-    )
+    initial = np.atleast_1d(np.asarray(start if spec.initial is None else spec.initial, float))
     if spec.upper is not None:
         upper = float(spec.upper)
     else:
@@ -288,9 +253,7 @@ def default_squared_lengthscale(
     if spec.lower is not None:
         lower = float(spec.lower)
     else:
-        lower = max(
-            smallest / 2.0 if learn else float(initial.min()), ROOT_MACHINE_EPSILON
-        )
+        lower = max(smallest / 2.0 if learn else float(initial.min()), ROOT_MACHINE_EPSILON)
     if spec.prior is not None or not include_prior:
         prior = spec.prior
     else:
@@ -319,11 +282,7 @@ def default_nugget(spec: ParamSpec, outputs: np.ndarray) -> Param:
     if spec.prior is not None:
         prior = spec.prior
     else:
-        prior = (
-            GammaPrior.with_mass_below(float(squared_deviations.mean()))
-            if learn
-            else None
-        )
+        prior = GammaPrior.with_mass_below(float(squared_deviations.mean())) if learn else None
 
     param = Param(initial=initial, lower=lower, upper=upper, prior=prior, learn=learn)
     param.validate()

@@ -28,9 +28,7 @@ def _speed_panel(ax, timing: pd.DataFrame, method: str):
 
 
 def _accuracy_panel(ax, accuracy: pd.DataFrame):
-    grouped = accuracy.groupby(["method", "m"])[
-        ["mean_rel_err_med", "var_rel_err_med"]
-    ].max()
+    grouped = accuracy.groupby(["method", "m"])[["mean_rel_err_med", "var_rel_err_med"]].max()
     grouped.plot.bar(ax=ax, logy=True)
     ax.set_title("JAX vs laGP predictive agreement")
     ax.set_ylabel("median relative error (worst case)")
@@ -47,9 +45,7 @@ def _locations_figure(csvs: list[str], out: str):
     """Wall clock and speedup against the predictive-location count, at fixed n."""
     timing = pd.concat([pd.read_csv(BENCH_DIR / c) for c in csvs], ignore_index=True)
     methods = sorted(timing.method.unique())
-    fig, axes = plt.subplots(
-        2, len(methods), figsize=(6 * len(methods), 9), squeeze=False
-    )
+    fig, axes = plt.subplots(2, len(methods), figsize=(6 * len(methods), 9), squeeze=False)
 
     for col, method in enumerate(methods):
         sub = timing[timing.method == method]

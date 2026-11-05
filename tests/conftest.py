@@ -24,9 +24,7 @@ def pytest_sessionfinish(session, exitstatus):
     """Under LAGPAX_STRICT a skip fails the run: it means R never loaded and nothing was compared."""
     if _skipped and os.environ.get("LAGPAX_STRICT"):
         session.exitstatus = 1
-        print(
-            f"\nLAGPAX_STRICT: {len(_skipped)} test(s) skipped, so the suite proved nothing:"
-        )
+        print(f"\nLAGPAX_STRICT: {len(_skipped)} test(s) skipped, so the suite proved nothing:")
         for nodeid in sorted(_skipped):
             print(f"  {nodeid}")
 
@@ -79,9 +77,7 @@ def R() -> RlaGP:
     return RlaGP(ro, numpy2ri)
 
 
-def _design(
-    n: int, m: int, seed: int, noise: float = 0.0
-) -> tuple[np.ndarray, np.ndarray]:
+def _design(n: int, m: int, seed: int, noise: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
     rng = np.random.default_rng(seed)
     X = rng.random((n, m))
     Z = np.sin(4 * X[:, 0]) + np.cos(3 * X[:, 1 : min(m, 3)].sum(-1)) + 0.1 * X.sum(-1)

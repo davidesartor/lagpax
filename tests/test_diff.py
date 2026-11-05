@@ -6,15 +6,12 @@ two halves separately: the machinery against an argmin with a closed form, and t
 fit against an argmin solved to machine precision.
 """
 
-import numpy as np
-import pytest
-
 import jax
 import jax.numpy as jnp
+import numpy as np
+import pytest
+from helpers import fit_kernel_only, fit_nugget_only, make_gp
 
-import lagpax as lagp
-from helpers import make_gp
-from lagpax.fitting import fit_nugget, fit_squared_lengthscales
 from lagpax.gaussian_process import Hyperparameters, log_likelihood_at
 from lagpax.local import LocalGP
 from lagpax.optimize import with_implicit_gradient
@@ -27,9 +24,7 @@ def _bounds(lo, hi, which):
     fixed = Param(lower=1e-8, upper=1.0, learn=False)
     if which == "squared_lengthscale":
         return Prior(squared_lengthscale=box, nugget=fixed)
-    return Prior(
-        squared_lengthscale=Param(lower=1e-3, upper=10.0, learn=False), nugget=box
-    )
+    return Prior(squared_lengthscale=Param(lower=1e-3, upper=10.0, learn=False), nugget=box)
 
 
 def _quadratic(p, A, M):
@@ -61,9 +56,7 @@ def test_implicit_gradient_reproduces_a_closed_form_jacobian(quad):
         np.asarray(jnp.linalg.solve(A, M)),
         rtol=1e-11,
     )
-    np.testing.assert_array_equal(
-        np.asarray(solved(p)), np.asarray(jnp.linalg.solve(A, M @ p))
-    )
+    np.testing.assert_array_equal(np.asarray(solved(p)), np.asarray(jnp.linalg.solve(A, M @ p)))
 
 
 def test_implicit_gradient_leaves_the_value_bit_identical(quad):
@@ -102,9 +95,7 @@ def _exact_argmin_d(X, Z, d0, g, warm):
 
     gp = make_gp(jnp.asarray(X), jnp.asarray(Z), d0, g)
     nugget = gp.hyperparameters.nugget
-    grad = jax.jit(
-        jax.grad(lambda d: -log_likelihood_at(gp, Hyperparameters(d, nugget)))
-    )
+    grad = jax.jit(jax.grad(lambda d: -log_likelihood_at(gp, Hyperparameters(d, nugget))))
     sol = root(lambda d: np.asarray(grad(jnp.asarray(d))), warm, tol=1e-13)
 
     # hybr reports failure once it stops improving, which at this tolerance means it has
@@ -114,7 +105,7 @@ def _exact_argmin_d(X, Z, d0, g, warm):
 
 
 def test_lengthscale_gradient_matches_an_exactly_solved_argmin(noisy):
-    """d(s*)/dy through `fit_squared_lengthscales`, against a machine-precision argmin."""
+    """d(s*)/dy through `fit_hyperparameters`, against a machine-precision argmin."""
     X, Z = noisy
     X, Z = X[:60], Z[:60]
     d0, g = jnp.full(3, 0.5), 1e-2
@@ -122,9 +113,9 @@ def test_lengthscale_gradient_matches_an_exactly_solved_argmin(noisy):
 
     prior = _bounds(lo, hi, "squared_lengthscale")
     fitted = lambda Zv: (
-        fit_squared_lengthscales(
-            make_gp(jnp.asarray(X), Zv, d0, g), prior, max_iterations=200
-        )[1].squared_lengthscales
+        fit_kernel_only(make_gp(jnp.asarray(X), Zv, d0, g), prior, max_iterations=200)[
+            1
+        ].squared_lengthscales
     )
     got = np.asarray(jax.jacobian(fitted)(jnp.asarray(Z)))
 
@@ -134,10 +125,9 @@ def test_lengthscale_gradient_matches_an_exactly_solved_argmin(noisy):
         hi_z, lo_z = Z.copy(), Z.copy()
         hi_z[k] += step
         lo_z[k] -= step
-        want = (
-            _exact_argmin_d(X, hi_z, d0, g, warm)
-            - _exact_argmin_d(X, lo_z, d0, g, warm)
-        ) / (2 * step)
+        want = (_exact_argmin_d(X, hi_z, d0, g, warm) - _exact_argmin_d(X, lo_z, d0, g, warm)) / (
+            2 * step
+        )
         # the implicit derivative is exact at the true argmin and taken at the solver's;
         # at factr=1e7 vlse's L-BFGS-B leaves |grad| ~3e-5 on this problem, which moves
         # the Hessian-based derivative by ~3e-5 relative
@@ -155,18 +145,14 @@ def test_nugget_gradient_matches_finite_differences(noisy):
 
     prior = _bounds(lo, hi, "nugget")
     fitted = lambda Zv: (
-        fit_nugget(make_gp(jnp.asarray(X), Zv, d0, g0), prior, max_iterations=200)[
-            1
-        ].nugget
+        fit_nugget_only(make_gp(jnp.asarray(X), Zv, d0, g0), prior, max_iterations=200)[1].nugget
     )
     got = np.asarray(jax.grad(fitted)(jnp.asarray(Z)))
 
     def exact(Znp):
         gp = make_gp(jnp.asarray(X), jnp.asarray(Znp), d0, g0)
         squared = gp.hyperparameters.squared_lengthscales
-        dg = jax.jit(
-            jax.grad(lambda g: -log_likelihood_at(gp, Hyperparameters(squared, g)))
-        )
+        dg = jax.jit(jax.grad(lambda g: -log_likelihood_at(gp, Hyperparameters(squared, g))))
         return brentq(lambda g: float(dg(g)), lo, hi, xtol=1e-15, rtol=1e-15)
 
     step = 1e-4
@@ -186,7 +172,7 @@ def test_gradient_is_zero_when_the_nugget_is_pinned(small):
 
     prior = _bounds(lo, hi, "nugget")
     fitted = lambda Zv: (
-        fit_nugget(make_gp(jnp.asarray(X), Zv, jnp.full(3, 0.5), 1e-2), prior)[1].nugget
+        fit_nugget_only(make_gp(jnp.asarray(X), Zv, jnp.full(3, 0.5), 1e-2), prior)[1].nugget
     )
     assert float(fitted(jnp.asarray(Z))) == pytest.approx(lo, rel=1e-12)
     np.testing.assert_array_equal(np.asarray(jax.grad(fitted)(jnp.asarray(Z))), 0.0)

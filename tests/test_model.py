@@ -21,8 +21,7 @@ def _laGPsep(R, Xref, X, Z, method, lite=False, **kw):
     extra = "".join(f", {k}={v}" for k, v in kw.items())
     lite_arg = "TRUE" if lite else "FALSE"
     script = (
-        f"out <- laGPsep(Xref, {START}, {END}, X, Z, method='{method}', "
-        f"lite={lite_arg}{extra})"
+        f"out <- laGPsep(Xref, {START}, {END}, X, Z, method='{method}', lite={lite_arg}{extra})"
     )
     R(script, Xref=Xref, X=X, Z=Z)
     return R
@@ -53,9 +52,7 @@ def test_local_prediction_matches_r(R, medium, criterion):
     df = want[2]
     assert float(got.mean[0]) == pytest.approx(want[0], rel=1e-6, abs=1e-8)
     # laGPsep returns the Student-t scale; lagpax the variance, scale * df / (df - 2)
-    assert float(got.variance[0]) == pytest.approx(
-        want[1] * df / (df - 2), rel=1e-4, abs=1e-12
-    )
+    assert float(got.variance[0]) == pytest.approx(want[1] * df / (df - 2), rel=1e-4, abs=1e-12)
     assert float(got.degrees_of_freedom) == pytest.approx(df)
     assert float(got.log_likelihood) == pytest.approx(want[3], rel=1e-6)
 

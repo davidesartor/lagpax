@@ -4,10 +4,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from helpers import fit_kernel_only, make_gp
 
 import lagpax as lagp
-from helpers import make_gp
-from lagpax.fitting import fit_squared_lengthscales
 from lagpax.priors import GammaPrior, Param, Prior
 
 D = np.array([0.3, 0.7, 1.1])
@@ -15,11 +14,7 @@ G = 1e-3
 
 
 def _local(X, Z, Xref, **settings):
-    return (
-        lagp.LocalGP(initial_neighbors=6, neighbors=30, **settings)
-        .fit(X, Z)
-        .predict_local(Xref)
-    )
+    return lagp.LocalGP(initial_neighbors=6, neighbors=30, **settings).fit(X, Z).predict_local(Xref)
 
 
 def _gp(small):
@@ -52,9 +47,7 @@ def test_importing_the_package_leaves_x64_alone_and_float32_runs():
     import subprocess
     import sys
 
-    res = subprocess.run(
-        [sys.executable, "-c", _FLOAT32_RUN], capture_output=True, text=True
-    )
+    res = subprocess.run([sys.executable, "-c", _FLOAT32_RUN], capture_output=True, text=True)
     assert res.returncode == 0, res.stderr[-2000:]
 
 
@@ -102,17 +95,13 @@ def test_pred_vmaps_over_locations(small):
 def test_the_fit_jits(small):
     gp = _gp(small)
     prior = Prior(
-        squared_lengthscale=Param(
-            lower=1e-3, upper=10.0, prior=GammaPrior(1.5, 3.9), learn=True
-        ),
+        squared_lengthscale=Param(lower=1e-3, upper=10.0, prior=GammaPrior(1.5, 3.9), learn=True),
         nugget=Param(learn=False),
     )
-    f = jax.jit(
-        lambda gp, prior: fit_squared_lengthscales(gp, prior)[1].squared_lengthscales
-    )
+    f = jax.jit(lambda gp, prior: fit_kernel_only(gp, prior)[1].squared_lengthscales)
     np.testing.assert_allclose(
         np.asarray(f(gp, prior)),
-        np.asarray(fit_squared_lengthscales(gp, prior)[1].squared_lengthscales),
+        np.asarray(fit_kernel_only(gp, prior)[1].squared_lengthscales),
         rtol=1e-12,
     )
 
@@ -161,9 +150,7 @@ def test_the_emulator_is_a_pytree_that_jit_takes_as_an_argument(medium):
     emu = _emu(medium)
     XX = medium[0][:3] + 0.01
     leaves = jax.tree.leaves(emu)
-    assert any(v is emu.inputs for v in leaves) and any(
-        v is emu.outputs for v in leaves
-    )
+    assert any(v is emu.inputs for v in leaves) and any(v is emu.outputs for v in leaves)
 
     eager = emu(XX, batch_size=None).mean
     jitted = jax.jit(lambda e, x: e(x, batch_size=None).mean)(emu, XX)
@@ -180,9 +167,7 @@ def test_vmap_over_the_per_location_function_matches_the_emulator(medium):
     emu = _emu(medium)
     XX = medium[0][:4] + 0.01
     mapped = jax.vmap(lambda x: emu.predict_local(x[None]).mean[0])(jnp.asarray(XX))
-    np.testing.assert_allclose(
-        np.asarray(mapped), np.asarray(emu(XX).mean), rtol=1e-4, atol=1e-8
-    )
+    np.testing.assert_allclose(np.asarray(mapped), np.asarray(emu(XX).mean), rtol=1e-4, atol=1e-8)
 
 
 def test_ieci_incumbent_is_data_and_its_flags_are_program(medium):

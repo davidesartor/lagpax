@@ -4,14 +4,13 @@ The claim being tested is calibration: profiling out a trend widens the interval
 uncertainty in the fitted mean, which simple kriging drops. rmse is not the claim.
 """
 
-import numpy as np
-import pytest
-
 import jax
 import jax.numpy as jnp
+import numpy as np
+import pytest
+from helpers import make_gp
 
 import lagpax as lagp
-from helpers import make_gp
 from lagpax.gaussian_process import trend_basis
 
 D = np.array([0.3, 0.7, 1.1])
@@ -63,9 +62,7 @@ def test_constant_trend_coefficient_is_the_gls_mean(small):
 
     far = np.full((3, X.shape[1]), 30.0)
     np.testing.assert_allclose(np.asarray(gp.predict(far).mean), gls, rtol=1e-10)
-    np.testing.assert_allclose(
-        np.asarray(_gp(X, Z, "zero").predict(far).mean), 0.0, atol=1e-12
-    )
+    np.testing.assert_allclose(np.asarray(_gp(X, Z, "zero").predict(far).mean), 0.0, atol=1e-12)
 
 
 def test_trend_recovers_a_linear_response_outside_the_design():
@@ -93,16 +90,16 @@ def test_mask_matches_a_smaller_design_with_a_trend(small):
         np.testing.assert_allclose(
             np.asarray(padded.trend_coefficients), np.asarray(exact.trend_coefficients), rtol=1e-10
         )
-        assert float(padded.residual_sum_of_squares) == pytest.approx(float(exact.residual_sum_of_squares), rel=1e-10)
+        assert float(padded.residual_sum_of_squares) == pytest.approx(
+            float(exact.residual_sum_of_squares), rel=1e-10
+        )
         assert float(padded.log_likelihood()) == pytest.approx(
             float(exact.log_likelihood()), rel=1e-10
         )
 
         XX = X[:5] + 0.05
         a, b = padded.predict(XX), exact.predict(XX)
-        np.testing.assert_allclose(
-            np.asarray(a.mean), np.asarray(b.mean), rtol=1e-10, atol=1e-12
-        )
+        np.testing.assert_allclose(np.asarray(a.mean), np.asarray(b.mean), rtol=1e-10, atol=1e-12)
         np.testing.assert_allclose(
             np.asarray(a.variance), np.asarray(b.variance), rtol=1e-8, atol=1e-12
         )

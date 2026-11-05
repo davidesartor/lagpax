@@ -83,9 +83,7 @@ class RlaGP:
                 dstart=np.atleast_1d(d.initial),
                 dmin=np.array([d.lower]),
                 dmax=np.array([d.upper]),
-                dab=np.asarray(
-                    (0.0, 0.0) if d.prior is None else (d.prior.shape, d.prior.rate)
-                ),
+                dab=np.asarray((0.0, 0.0) if d.prior is None else (d.prior.shape, d.prior.rate)),
             )
             arg = ", d=dprior"
         self(

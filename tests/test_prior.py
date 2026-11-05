@@ -22,9 +22,7 @@ def _r_arg(R, call: str, **data) -> np.ndarray:
 
 def _assert_darg(got: Param, want: np.ndarray, nstart: int = 1):
     start, rest = want[:nstart], want[nstart:]
-    np.testing.assert_allclose(
-        np.atleast_1d(np.asarray(got.initial)), start, rtol=1e-13
-    )
+    np.testing.assert_allclose(np.atleast_1d(np.asarray(got.initial)), start, rtol=1e-13)
     assert got.lower == pytest.approx(rest[0], rel=1e-13)
     assert got.upper == pytest.approx(rest[1], rel=1e-13)
     assert float(got.learn) == rest[2]
@@ -38,9 +36,7 @@ def test_gamma_prior_with_mass_below_matches_lagps_rule(R, shape, mass):
     """laGP sets rate = Igamma.inv(a, mass * gamma(a), lower=1, log=0) / upper."""
     upper = 2.7
     got = GammaPrior.with_mass_below(upper, shape=shape, mass=mass)
-    want = R.scalar(
-        f"laGP:::Igamma.inv({shape}, {mass}*gamma({shape}), 1, 0) / {upper}"
-    )
+    want = R.scalar(f"laGP:::Igamma.inv({shape}, {mass}*gamma({shape}), 1, 0) / {upper}")
     assert got.shape == shape
     assert got.rate == pytest.approx(want, rel=1e-9)
 
@@ -48,9 +44,7 @@ def test_gamma_prior_with_mass_below_matches_lagps_rule(R, shape, mass):
 def test_distance_summary_matches_r(R, medium):
     X, _ = medium
     start, dmin, dmax = pairwise_distance_summary(X)
-    want = np.asarray(
-        R("Ds <- laGP:::getDs(X); c(Ds$start, Ds$min, Ds$max)", X=X)
-    ).ravel()
+    want = np.asarray(R("Ds <- laGP:::getDs(X); c(Ds$start, Ds$min, Ds$max)", X=X)).ravel()
     np.testing.assert_allclose([start, dmin, dmax], want, rtol=1e-13)
 
 
@@ -102,9 +96,7 @@ def test_default_nugget_scalar_matches_r(R, medium):
 
 def test_default_nugget_mle_matches_r(R, medium):
     _, Z = medium
-    _assert_darg(
-        default_nugget(Param(learn=True), Z), _r_arg(R, "garg(list(mle=TRUE), Z)", Z=Z)
-    )
+    _assert_darg(default_nugget(Param(learn=True), Z), _r_arg(R, "garg(list(mle=TRUE), Z)", Z=Z))
 
 
 def test_default_squared_lengthscale_rejects_start_outside_box(medium):

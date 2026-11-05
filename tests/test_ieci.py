@@ -1,13 +1,12 @@
 """IECI against laGP:::ieciGPsep, and the direction that makes it a BO criterion."""
 
-import numpy as np
-import pytest
-
 import jax
 import jax.numpy as jnp
+import numpy as np
+import pytest
+from helpers import make_gp
 
 import lagpax as lagp
-from helpers import make_gp
 
 
 def _split(X, Z, ndesign=25, ncand=10):
@@ -39,16 +38,15 @@ def test_ieci_matches_iecigpsep(R, request, fixture, rtol, nugget):
 
     want = np.asarray(
         R(
-            f"laGP:::ieciGPsep(gpi, Xcand, {fmin!r}, Xref,"
-            f" nonug={'FALSE' if nugget else 'TRUE'})",
+            f"laGP:::ieciGPsep(gpi, Xcand, {fmin!r}, Xref, nonug={'FALSE' if nugget else 'TRUE'})",
             Xcand=np.asarray(Xcand),
             Xref=np.asarray(Xref),
         )
     ).ravel()
     got = np.asarray(
-        lagp.IntegratedExpectedConditionalImprovement(
-            best_observed=fmin, include_nugget=nugget
-        )(gp, Xcand, Xref)
+        lagp.IntegratedExpectedConditionalImprovement(best_observed=fmin, include_nugget=nugget)(
+            gp, Xcand, Xref
+        )
     )
     np.testing.assert_allclose(got, want, rtol=rtol)
 
@@ -69,9 +67,9 @@ def test_ieci_weights_match_lagp(R, small):
         )
     ).ravel()
     got = np.asarray(
-        lagp.IntegratedExpectedConditionalImprovement(
-            best_observed=fmin, weights=jnp.asarray(w)
-        )(gp, Xcand, Xref)
+        lagp.IntegratedExpectedConditionalImprovement(best_observed=fmin, weights=jnp.asarray(w))(
+            gp, Xcand, Xref
+        )
     )
     np.testing.assert_allclose(got, want, rtol=1e-10)
 
@@ -98,9 +96,7 @@ def test_ieci_is_minimized_and_alc_is_not():
 
 def test_ieci_declares_its_direction():
     """The greedy loop reads `minimize` off the criterion instead of hardcoding argmax."""
-    assert lagp.IntegratedExpectedConditionalImprovement(
-        best_observed=0.0
-    ).lower_is_better
+    assert lagp.IntegratedExpectedConditionalImprovement(best_observed=0.0).lower_is_better
     assert not lagp.ActiveLearningCohn().lower_is_better
 
 
@@ -144,9 +140,7 @@ def test_the_local_model_runs_with_ieci(medium):
     # with several reference locations the monotone tie breaks and the designs diverge
     Xref = XX[:3]
     ours = (
-        model.replace(
-            criterion=lagp.IntegratedExpectedConditionalImprovement(best_observed=fmin)
-        )
+        model.replace(criterion=lagp.IntegratedExpectedConditionalImprovement(best_observed=fmin))
         .fit(X, Z)
         .predict_local(Xref)
         .neighbors
