@@ -161,21 +161,6 @@ class ContinuousSearch(Search):
         return chosen[best_untaken(scores, taken[chosen], criterion.lower_is_better)]
 
 
-SEARCHES_BY_NAME: dict[str, type[Search]] = {
-    "exhaustive": ExhaustiveSearch,
-    "ray": RaySearch,
-    "continuous": ContinuousSearch,
-}
-
-
-def as_search(search: str | Search) -> Search:
-    if isinstance(search, Search):
-        return search
-    if isinstance(search, str) and search in SEARCHES_BY_NAME:
-        return SEARCHES_BY_NAME[search]()
-    raise ValueError(f"unknown search {search!r}")
-
-
 def best_untaken(
     scores: Float[Array, "c"], taken: Bool[Array, "c"], lower_is_better: bool
 ) -> Int[Array, ""]:

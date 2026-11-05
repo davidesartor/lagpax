@@ -240,6 +240,10 @@ that say what a thing is so the code needs no comments, and type hints on everyt
   at the default Gamma rate, now `gammaincinv(a, mass)` instead of laGP's
   `Igamma.inv(a, mass * gamma(a))` — one ulp apart (`prior.*.d.ab`, 1e-15), which nudges the MAP
   objective and so the fitted squared lengthscales and everything downstream.
+- **Then tightened:** code used once was inlined (name resolution into `LocalGP.__post_init__`,
+  the greedy design loop into `_predict_local`, the Student-t expected improvement into its
+  criterion, single-use constants and samplers), and `predict`'s full-covariance branch now shares
+  `predictive_mean_and_scale` instead of repeating it. 2,040 -> 1,980 lines, snapshot bit-identical.
 - **Tests did not move a tolerance.** Every module was ported to the new names and passes as
   before; the `Igamma.inv` test became a parity test of `GammaPrior.with_mass_below`, and the
   analytic-derivative test of the kernel went with `dcorrelation` (autodiff covers it).

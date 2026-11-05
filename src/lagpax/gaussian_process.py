@@ -49,10 +49,6 @@ class Hyperparameters:
     squared_lengthscales: Float[Array, "d"]
     nugget: Scalar
 
-    @property
-    def lengthscales(self) -> Float[Array, "d"]:
-        return jnp.sqrt(0.5 * self.squared_lengthscales)
-
 
 class Prediction(NamedTuple):
     """A Student-t predictive distribution.
@@ -210,70 +206,56 @@ class GaussianProcess:
         include_nugget: bool = True,
     ) -> Prediction:
         """Student-t predictive at `new_inputs`; `include_nugget=False` predicts the latent surface."""
-        log_likelihood = _profiled_log_likelihood(
-            self.degrees_of_freedom,
-            self.log_det_correlation,
-            self.log_det_trend_information,
-            self.residual_sum_of_squares,
-        )
         dof = self.degrees_of_freedom
+        mean, scale = predictive_mean_and_scale(
+            self, new_inputs, include_nugget, full_covariance
+        )
+        variance = scale * dof / (dof - 2.0)
         if not full_covariance:
-            mean, scale = predictive_mean_and_scale(self, new_inputs, include_nugget)
-            return Prediction(mean, scale * dof / (dof - 2.0), dof, log_likelihood)
-
-        nugget = self.hyperparameters.nugget if include_nugget else ROOT_MACHINE_EPSILON
-        cross = jnp.where(
-            self.active[:, None],
-            correlation(
-                self.inputs, new_inputs, self.hyperparameters.squared_lengthscales
-            ),
-            0.0,
-        )
-        weights = cross.T @ self.inverse_correlation
-        mean = weights @ self.residuals
-        unscaled = (
-            correlation_with_nugget(
-                new_inputs, self.hyperparameters.squared_lengthscales, nugget
-            )
-            - weights @ cross
-        )
-        if self.trend_size:
-            new_basis = trend_basis(self.trend, new_inputs)
-            trend_uncertainty = new_basis - weights @ self.trend_basis
-            mean = mean + new_basis @ self.trend_coefficients
-            unscaled = (
-                unscaled
-                + trend_uncertainty
-                @ self.inverse_trend_information
-                @ trend_uncertainty.T
-            )
-        covariance = self.residual_sum_of_squares / dof * unscaled * dof / (dof - 2.0)
+            return Prediction(mean, variance, dof, self.log_likelihood())
         return Prediction(
-            mean, jnp.diagonal(covariance), dof, log_likelihood, covariance
+            mean, jnp.diagonal(variance), dof, self.log_likelihood(), variance
         )
 
 
 def predictive_mean_and_scale(
-    gp: GaussianProcess, new_inputs: Float[Array, "m d"], include_nugget: bool = True
-) -> tuple[Float[Array, "m"], Float[Array, "m"]]:
-    """Predictive mean and squared Student-t scale (variance * (dof - 2) / dof) at new_inputs."""
+    gp: GaussianProcess,
+    new_inputs: Float[Array, "m d"],
+    include_nugget: bool = True,
+    full_covariance: bool = False,
+) -> tuple[Float[Array, "m"], Float[Array, "m"] | Float[Array, "m m"]]:
+    """Predictive mean and squared Student-t scale (variance * (dof - 2) / dof) at new_inputs,
+    per point or as a full matrix."""
     nugget = gp.hyperparameters.nugget if include_nugget else ROOT_MACHINE_EPSILON
+    squared_lengthscales = gp.hyperparameters.squared_lengthscales
     cross = jnp.where(
         gp.active[:, None],
-        correlation(gp.inputs, new_inputs, gp.hyperparameters.squared_lengthscales),
+        correlation(gp.inputs, new_inputs, squared_lengthscales),
         0.0,
     )
     weights = cross.T @ gp.inverse_correlation
     mean = weights @ gp.residuals
-    unscaled = 1.0 + nugget - jnp.sum(weights.T * cross, axis=0)
+    if full_covariance:
+        prior_correlation = correlation_with_nugget(
+            new_inputs, squared_lengthscales, nugget
+        )
+        unscaled = prior_correlation - weights @ cross
+    else:
+        unscaled = 1.0 + nugget - jnp.sum(weights.T * cross, axis=0)
     if gp.trend_size:
         new_basis = trend_basis(gp.trend, new_inputs)
         trend_uncertainty = new_basis - weights @ gp.trend_basis
         mean = mean + new_basis @ gp.trend_coefficients
-        unscaled = unscaled + jnp.sum(
-            (trend_uncertainty @ gp.inverse_trend_information) * trend_uncertainty,
-            axis=-1,
-        )
+        if full_covariance:
+            unscaled = (
+                unscaled
+                + trend_uncertainty @ gp.inverse_trend_information @ trend_uncertainty.T
+            )
+        else:
+            unscaled = unscaled + jnp.sum(
+                (trend_uncertainty @ gp.inverse_trend_information) * trend_uncertainty,
+                axis=-1,
+            )
     return mean, gp.residual_sum_of_squares / gp.degrees_of_freedom * unscaled
 
 
@@ -357,7 +339,12 @@ def _with_log_prior(
 ) -> Scalar:
     if prior is None:
         return log_likelihood
-    with_kernel = log_likelihood + prior.kernel_log_density(
-        hyperparameters.squared_lengthscales
-    )
-    return with_kernel + prior.nugget_log_density(hyperparameters.nugget)
+    if prior.kernel.prior is not None:
+        kernel_values = prior.from_squared_lengthscales(
+            hyperparameters.squared_lengthscales
+        )
+        densities = prior.kernel.prior.log_density(kernel_values)
+        log_likelihood = log_likelihood + jnp.sum(
+            jnp.where(kernel_values > 0, densities, 0.0)
+        )
+    return log_likelihood + prior.nugget_log_density(hyperparameters.nugget)

@@ -23,7 +23,6 @@ from jaxtyping import Array, Float, Key, Scalar
 from ._pytree import pytree_dataclass, static
 
 ROOT_MACHINE_EPSILON = float(np.sqrt(np.finfo(float).eps))
-LAGP_DEFAULT_NUGGET = 1e-4
 
 KernelSpace = Literal["squared_lengthscale", "lengthscale"]
 
@@ -132,14 +131,6 @@ class Prior:
             return squared
         return jnp.sqrt(0.5 * squared)
 
-    def kernel_log_density(self, squared_lengthscales: Float[Array, "d"]) -> Scalar:
-        """Log prior density of the kernel parameter, in this prior's kernel space."""
-        if self.kernel.prior is None:
-            return jnp.zeros((), jnp.result_type(squared_lengthscales))
-        kernel_values = self.from_squared_lengthscales(squared_lengthscales)
-        densities = self.kernel.prior.log_density(kernel_values)
-        return jnp.sum(jnp.where(kernel_values > 0, densities, 0.0))
-
     def nugget_log_density(self, nugget: Scalar) -> Scalar:
         if self.nugget.prior is None:
             return jnp.zeros((), jnp.result_type(nugget))
@@ -179,7 +170,7 @@ class Prior:
         inputs: np.ndarray,
         outputs: np.ndarray,
         kernel: ParamSpec = None,
-        nugget: ParamSpec = LAGP_DEFAULT_NUGGET,
+        nugget: ParamSpec = 1e-4,
         kernel_space: KernelSpace = "squared_lengthscale",
         sample_size: int = 1000,
         key: Optional[Key[Array, ""]] = None,
@@ -250,7 +241,13 @@ def pairwise_distance_summary(
     """(quantile, min, max) of the positive pairwise squared distances; laGP's getDs."""
     inputs = np.atleast_2d(np.asarray(inputs, float))
     if inputs.shape[0] > sample_size:
-        inputs = inputs[_sample_rows(key, inputs.shape[0], sample_size)]
+        if key is None:
+            raise ValueError(
+                f"the default prior subsamples {inputs.shape[0]} rows down to {sample_size}, "
+                "which is random: pass key=jax.random.key(...)"
+            )
+        rows = jax.random.choice(key, inputs.shape[0], (sample_size,), replace=False)
+        inputs = inputs[np.asarray(rows)]
     distances = np.sum(np.square(inputs[:, None, :] - inputs[None, :, :]), axis=-1)
     distances = distances[np.triu_indices_from(distances, k=1)]
     distances = distances[distances > 0]
@@ -259,17 +256,6 @@ def pairwise_distance_summary(
         float(distances.min()),
         float(distances.max()),
     )
-
-
-def _sample_rows(
-    key: Optional[Key[Array, ""]], total: int, sample_size: int
-) -> np.ndarray:
-    if key is None:
-        raise ValueError(
-            f"the default prior subsamples {total} rows down to {sample_size}, which is random: "
-            "pass key=jax.random.key(...)"
-        )
-    return np.asarray(jax.random.choice(key, total, (sample_size,), replace=False))
 
 
 def default_squared_lengthscale(

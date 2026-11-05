@@ -16,7 +16,7 @@ from typing import Callable, ClassVar, Optional
 
 import jax.numpy as jnp
 from jax.scipy.special import betainc, gammaln
-from jaxtyping import Array, Float, Scalar
+from jaxtyping import Array, Float
 
 from ._pytree import pytree_dataclass, static
 from .gaussian_process import GaussianProcess, predictive_mean_and_scale
@@ -90,8 +90,22 @@ class IntegratedExpectedConditionalImprovement(Criterion):
         )
         dof = gp.degrees_of_freedom
         sharpened_scale = reference_scale - gp.residual_sum_of_squares * reduction / dof
-        improvement = student_t_expected_improvement(
-            reference_mean, jnp.maximum(sharpened_scale, 0.0), dof, self.best_observed
+        scale = jnp.sqrt(jnp.maximum(sharpened_scale, 0.0))
+        scale = jnp.where(scale > 0, scale, 1.0)
+        standardized = (self.best_observed - reference_mean) / scale
+        student_t_log_density = (
+            gammaln(0.5 * (dof + 1.0))
+            - gammaln(0.5 * dof)
+            - 0.5 * jnp.log(jnp.pi * dof)
+            - 0.5 * (dof + 1.0) * jnp.log1p(jnp.square(standardized) / dof)
+        )
+        tail = 0.5 * betainc(0.5 * dof, 0.5, dof / (dof + jnp.square(standardized)))
+        student_t_cdf = jnp.where(standardized <= 0, tail, 1.0 - tail)
+        improvement = scale * (
+            standardized * student_t_cdf
+            + (dof + jnp.square(standardized))
+            / (dof - 1.0)
+            * jnp.exp(student_t_log_density)
         )
         if self.weights is not None:
             improvement = self.weights * improvement
@@ -114,29 +128,6 @@ class CustomCriterion(Criterion):
         if self.reuses_candidate_correlation and candidate_correlation is not None:
             return self.score(gp, candidates, references, candidate_correlation)
         return self.score(gp, candidates, references)
-
-
-CRITERIA_BY_NAME: dict[str, type[Criterion]] = {
-    "nn": NearestNeighbor,
-    "alc": ActiveLearningCohn,
-}
-
-
-def as_criterion(criterion: str | Criterion | Callable) -> Criterion:
-    if isinstance(criterion, Criterion):
-        return criterion
-    if isinstance(criterion, str):
-        if criterion == "ieci":
-            raise ValueError(
-                "ieci needs the best observed value: "
-                "pass IntegratedExpectedConditionalImprovement(best_observed=...)"
-            )
-        if criterion not in CRITERIA_BY_NAME:
-            raise ValueError(f"unknown criterion {criterion!r}")
-        return CRITERIA_BY_NAME[criterion]()
-    if callable(criterion):
-        return CustomCriterion(criterion)
-    raise TypeError(f"not a criterion: {criterion!r}")
 
 
 def variance_reduction(
@@ -171,35 +162,3 @@ def variance_reduction(
         + jnp.square(candidate_to_reference) / conditional_variance[:, None]
     )
     return reduction, conditional_variance
-
-
-def student_t_expected_improvement(
-    mean: Float[Array, "..."],
-    squared_scale: Float[Array, "..."],
-    degrees_of_freedom: Scalar,
-    best_observed: Scalar,
-) -> Float[Array, "..."]:
-    """E[max(best_observed - Y, 0)] for Y Student-t with this location, scale and dof."""
-    scale = jnp.sqrt(jnp.maximum(squared_scale, 0.0))
-    scale = jnp.where(scale > 0, scale, 1.0)
-    standardized = (best_observed - mean) / scale
-    dof = degrees_of_freedom
-
-    log_density = (
-        gammaln(0.5 * (dof + 1.0))
-        - gammaln(0.5 * dof)
-        - 0.5 * jnp.log(jnp.pi * dof)
-        - 0.5 * (dof + 1.0) * jnp.log1p(jnp.square(standardized) / dof)
-    )
-    return scale * (
-        (best_observed - mean) / scale * student_t_cdf(standardized, dof)
-        + (dof + jnp.square(standardized)) / (dof - 1.0) * jnp.exp(log_density)
-    )
-
-
-def student_t_cdf(
-    standardized: Float[Array, "..."], degrees_of_freedom: Scalar
-) -> Float[Array, "..."]:
-    dof = degrees_of_freedom
-    tail = 0.5 * betainc(0.5 * dof, 0.5, dof / (dof + jnp.square(standardized)))
-    return jnp.where(standardized <= 0, tail, 1.0 - tail)

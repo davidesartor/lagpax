@@ -24,7 +24,7 @@ import numpy as np
 from jaxtyping import Array, Bool, Float, Int, Key, Scalar
 
 from ._pytree import pytree_dataclass, static
-from .criteria import Criterion, NearestNeighbor, as_criterion
+from .criteria import ActiveLearningCohn, Criterion, CustomCriterion, NearestNeighbor
 from .fitting import fit_hyperparameters
 from .gaussian_process import (
     GaussianProcess,
@@ -35,7 +35,7 @@ from .gaussian_process import (
 )
 from .kernel import correlation, squared_distances
 from .priors import Prior
-from .search import ContinuousSearch, RaySearch, Search, as_search
+from .search import ContinuousSearch, ExhaustiveSearch, RaySearch
 
 
 @pytree_dataclass
@@ -61,8 +61,30 @@ class LocalGP:
     max_iterations: int = static(default=100)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "criterion", as_criterion(self.criterion))
-        object.__setattr__(self, "search", as_search(self.search))
+        criterion, search = self.criterion, self.search
+        if criterion == "ieci":
+            raise ValueError(
+                "ieci needs the best observed value: "
+                "pass IntegratedExpectedConditionalImprovement(best_observed=...)"
+            )
+        if isinstance(criterion, str):
+            criteria = {"nn": NearestNeighbor, "alc": ActiveLearningCohn}
+            if criterion not in criteria:
+                raise ValueError(f"unknown criterion {criterion!r}")
+            criterion = criteria[criterion]()
+        elif not isinstance(criterion, Criterion):
+            criterion = CustomCriterion(criterion)
+        if isinstance(search, str):
+            searches = {
+                "exhaustive": ExhaustiveSearch,
+                "ray": RaySearch,
+                "continuous": ContinuousSearch,
+            }
+            if search not in searches:
+                raise ValueError(f"unknown search {search!r}")
+            search = searches[search]()
+        object.__setattr__(self, "criterion", criterion)
+        object.__setattr__(self, "search", search)
 
     def replace(self, **changes: Any) -> LocalGP:
         return dataclasses.replace(self, **changes)
@@ -92,8 +114,14 @@ class LocalGP:
         if count <= self.neighbors:
             raise ValueError("need more training points than neighbors")
 
+        scores_every_candidate = not isinstance(
+            self.search, (RaySearch, ContinuousSearch)
+        )
+        default_candidates = (1000 + self.neighbors) * (
+            1 if scores_every_candidate else 10
+        )
         candidates = (
-            _default_candidates(self.neighbors, count, self.search)
+            min(default_candidates, count)
             if self.candidates is None
             else int(self.candidates)
         )
@@ -224,7 +252,91 @@ def _predict_local(
     pool = jax.lax.top_k(-distance_to_references, model.candidates)[1]
     pool_inputs, pool_outputs = emulator.inputs[pool], emulator.outputs[pool]
 
-    design = _select_design(model, pool_inputs, pool_outputs, references, starting)
+    initial, neighbors = model.initial_neighbors, model.neighbors
+    criterion, search = model.criterion, model.search
+    if isinstance(criterion, NearestNeighbor):
+        design = jnp.arange(neighbors)
+    else:
+        bounding_box = jnp.stack(
+            [
+                jnp.min(pool_inputs[initial:], axis=0),
+                jnp.max(pool_inputs[initial:], axis=0),
+            ]
+        )
+        candidate_correlation = None
+        if (
+            criterion.reuses_candidate_correlation
+            and search.reuses_candidate_correlation
+        ):
+            candidate_correlation = (
+                jnp.zeros((model.candidates, neighbors), pool_inputs.dtype)
+                .at[:, :initial]
+                .set(
+                    correlation(
+                        pool_inputs,
+                        pool_inputs[:initial],
+                        starting.squared_lengthscales,
+                    )
+                )
+            )
+        state = DesignState(
+            chosen=jnp.concatenate(
+                [jnp.arange(initial), jnp.zeros(neighbors - initial, int)]
+            ),
+            active=jnp.arange(neighbors) < initial,
+            taken=jnp.arange(model.candidates) < initial,
+            candidate_correlation=candidate_correlation,
+        )
+
+        def add_one_point(capacity: int):
+            def body(step: Scalar, state: DesignState) -> DesignState:
+                gp = GaussianProcess.from_data(
+                    pool_inputs[state.chosen[:capacity]],
+                    pool_outputs[state.chosen[:capacity]],
+                    starting,
+                    state.active[:capacity],
+                    model.trend,
+                )
+                cached = (
+                    None
+                    if state.candidate_correlation is None
+                    else state.candidate_correlation[:, :capacity]
+                )
+                pick = search(
+                    criterion,
+                    gp,
+                    pool_inputs,
+                    references,
+                    state.taken,
+                    step - initial,
+                    bounding_box,
+                    cached,
+                )
+                updated_correlation = state.candidate_correlation
+                if updated_correlation is not None:
+                    new_column = correlation(
+                        pool_inputs,
+                        pool_inputs[pick][None],
+                        starting.squared_lengthscales,
+                    )[:, 0]
+                    updated_correlation = updated_correlation.at[:, step].set(
+                        new_column
+                    )
+                return DesignState(
+                    state.chosen.at[step].set(pick),
+                    state.active.at[step].set(True),
+                    state.taken.at[pick].set(True),
+                    updated_correlation,
+                )
+
+            return body
+
+        for first_step, end_step, capacity in design_buckets(initial, neighbors):
+            state = jax.lax.fori_loop(
+                first_step, end_step, add_one_point(capacity), state
+            )
+        design = state.chosen
+
     gp = GaussianProcess.from_data(
         pool_inputs[design], pool_outputs[design], starting, trend=model.trend
     )
@@ -240,89 +352,6 @@ class DesignState(NamedTuple):
     candidate_correlation: Optional[Float[Array, "candidates neighbors"]]
 
 
-def _select_design(
-    model: LocalGP,
-    pool_inputs: Float[Array, "c d"],
-    pool_outputs: Float[Array, "c"],
-    references: Float[Array, "r d"],
-    starting: Hyperparameters,
-) -> Int[Array, "neighbors"]:
-    """Grow the local design one point at a time; returns positions in the distance-sorted pool."""
-    initial, neighbors = model.initial_neighbors, model.neighbors
-    criterion, search = model.criterion, model.search
-    if isinstance(criterion, NearestNeighbor):
-        return jnp.arange(neighbors)
-
-    bounding_box = jnp.stack(
-        [jnp.min(pool_inputs[initial:], axis=0), jnp.max(pool_inputs[initial:], axis=0)]
-    )
-    reuse_correlation = (
-        criterion.reuses_candidate_correlation and search.reuses_candidate_correlation
-    )
-    candidate_correlation = None
-    if reuse_correlation:
-        candidate_correlation = (
-            jnp.zeros((model.candidates, neighbors), pool_inputs.dtype)
-            .at[:, :initial]
-            .set(
-                correlation(
-                    pool_inputs, pool_inputs[:initial], starting.squared_lengthscales
-                )
-            )
-        )
-    state = DesignState(
-        chosen=jnp.concatenate(
-            [jnp.arange(initial), jnp.zeros(neighbors - initial, int)]
-        ),
-        active=jnp.arange(neighbors) < initial,
-        taken=jnp.arange(model.candidates) < initial,
-        candidate_correlation=candidate_correlation,
-    )
-
-    def add_one_point(capacity: int):
-        def body(step: Scalar, state: DesignState) -> DesignState:
-            gp = GaussianProcess.from_data(
-                pool_inputs[state.chosen[:capacity]],
-                pool_outputs[state.chosen[:capacity]],
-                starting,
-                state.active[:capacity],
-                model.trend,
-            )
-            cached = (
-                None
-                if state.candidate_correlation is None
-                else state.candidate_correlation[:, :capacity]
-            )
-            pick = search(
-                criterion,
-                gp,
-                pool_inputs,
-                references,
-                state.taken,
-                step - initial,
-                bounding_box,
-                cached,
-            )
-            updated_correlation = state.candidate_correlation
-            if updated_correlation is not None:
-                new_column = correlation(
-                    pool_inputs, pool_inputs[pick][None], starting.squared_lengthscales
-                )[:, 0]
-                updated_correlation = updated_correlation.at[:, step].set(new_column)
-            return DesignState(
-                state.chosen.at[step].set(pick),
-                state.active.at[step].set(True),
-                state.taken.at[pick].set(True),
-                updated_correlation,
-            )
-
-        return body
-
-    for first_step, end_step, capacity in design_buckets(initial, neighbors):
-        state = jax.lax.fori_loop(first_step, end_step, add_one_point(capacity), state)
-    return state.chosen
-
-
 def design_buckets(initial: int, neighbors: int) -> list[tuple[int, int, int]]:
     """Greedy steps grouped by the padded GP size they build: (first_step, end_step, capacity).
 
@@ -336,8 +365,3 @@ def design_buckets(initial: int, neighbors: int) -> list[tuple[int, int, int]]:
         buckets.append((step, end_step, capacity))
         step = end_step
     return buckets
-
-
-def _default_candidates(neighbors: int, count: int, search: Search) -> int:
-    scores_every_candidate = not isinstance(search, (RaySearch, ContinuousSearch))
-    return int(min((1000 + neighbors) * (1 if scores_every_candidate else 10), count))

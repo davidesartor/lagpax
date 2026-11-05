@@ -78,9 +78,12 @@ the parity suite targets — check out the tag.
 
 ## src/lagpax
 
-Written to read without comments: descriptive names, type hints everywhere (jaxtyping shapes on
-every array), docstrings on what is public, and an inline comment only where a name cannot carry
-the reason. Keep it that way — prefer renaming over commenting.
+Written to read without comments and to stay tight: descriptive names, type hints everywhere
+(jaxtyping shapes on every array), docstrings on what is public, an inline comment only where a
+name cannot carry the reason, and **code used once is inlined** — a helper exists only if it has
+two or more callers, is public API, or is a unit a test exercises directly (`design_buckets`,
+`_ray_ends`, `_golden_section_maximize`, `pairwise_distance_summary`). Prefer renaming over
+commenting, inlining over a one-call helper.
 
 The model is laGP's: correlation `exp(-sum_k (x_k - x'_k)^2 / s_k)` with `s` the
 `squared_lengthscales` (laGP's `d`), a `nugget` on the diagonal (laGP's `g`), the scale profiled out
@@ -104,8 +107,9 @@ as `residual_sum_of_squares = r' K^-1 r`, and a Student-t predictive with
   dataclass built by `GaussianProcess.from_data(inputs, outputs, hyperparameters, active, trend)`
   that caches `inverse_correlation` (ALC needs it), `log_det_correlation`,
   `residual_sum_of_squares` and the trend's GLS pieces. `log_likelihood_at(gp, hyperparameters)`
-  is the fit's objective: one Cholesky, no inverse. `predictive_mean_and_scale` gives the Student-t
-  *scale* the criteria need; `Prediction` only ever carries the variance.
+  is the fit's objective: one Cholesky, no inverse. `predictive_mean_and_scale` (per point or
+  `full_covariance`) gives the Student-t *scale*; `predict` and the criteria both use it, and
+  `Prediction` only ever carries the variance.
 - `optimize.py` — `with_implicit_gradient` (the derivative of an argmin, attached to a solver's
   answer), `newton_maximize_on_interval` (the nugget solver), and `R_OPTIM_RELATIVE_TOLERANCE`,
   R's `factr=1e7` times *float64's* epsilon in every dtype (float32's would make it ~1.2 and stop
@@ -119,19 +123,21 @@ as `residual_sum_of_squares = r' K^-1 r`, and a Student-t predictive with
 - `criteria.py` — `Criterion` subclasses `NearestNeighbor`, `ActiveLearningCohn`,
   `IntegratedExpectedConditionalImprovement(best_observed, weights=, include_nugget=)` and
   `CustomCriterion`. Class attributes `lower_is_better` and `reuses_candidate_correlation`.
-  `variance_reduction` is the shared rank-one update; `as_criterion` resolves "nn"/"alc".
+  `variance_reduction` is the shared rank-one update. Names ("nn", "alc") are resolved in
+  `LocalGP.__post_init__`, the only place that accepts them.
 - `search.py` — `Search` subclasses `ExhaustiveSearch`, `RaySearch(rays=, golden_section_steps=)`,
-  `ContinuousSearch(starts=, max_iterations=)`, all static and hashable by value. Called as
+  `ContinuousSearch(starts=, max_iterations=)`, all static and hashable by value (names resolved in
+  `LocalGP.__post_init__`). Called as
   `(criterion, gp, candidates, references, taken, step, bounding_box, candidate_correlation)`.
   `untaken_by_rank` reproduces laGP's "k-th still-available candidate" by cumsum + searchsorted.
 - `local.py` — `LocalGP(neighbors, initial_neighbors, candidates, criterion, search, trend,
   max_iterations)` and `Emulator(model, inputs, outputs, prior)`, both pytrees.
   `_predict_local(emulator, references, starting_squared_lengthscales, full_covariance=)` is the
   jitted core; `Emulator.predict_local` is the per-point primitive, `__call__` is
-  `lax.map(batch_size=)` over it, `refine` swaps the criterion between passes. `_select_design`
-  carries a `DesignState(chosen, active, taken, candidate_correlation)` through the greedy loop,
-  and `design_buckets` groups its steps by padded GP size (next power of two), so it traces
-  logarithmically many loop bodies.
+  `lax.map(batch_size=)` over it, `refine` swaps the criterion between passes. Inside
+  `_predict_local` the greedy loop carries a `DesignState(chosen, active, taken,
+  candidate_correlation)`, and `design_buckets` groups its steps by padded GP size (next power of
+  two), so it traces logarithmically many loop bodies.
 
 The public API is flat: `__init__.py` re-exports every name and pins them in `__all__`.
 **Importing lagpax changes no global state.** Computation follows the input's floating dtype;

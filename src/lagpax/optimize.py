@@ -10,9 +10,8 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Bool, Float, Int, Scalar
 
-R_OPTIM_FACTR = 1e7
-R_OPTIM_RELATIVE_TOLERANCE = R_OPTIM_FACTR * float(jnp.finfo(jnp.float64).eps)
-"""R's `factr` as scipy's `ftol`. Defined against double precision in every dtype: scaled by
+R_OPTIM_RELATIVE_TOLERANCE = 1e7 * float(jnp.finfo(jnp.float64).eps)
+"""R's default `factr` (1e7) as scipy's `ftol`. Defined against double precision in every dtype: scaled by
 float32's epsilon it would be ~1.2, and every fit would stop after one step."""
 
 
